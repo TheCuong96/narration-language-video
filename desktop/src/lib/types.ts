@@ -1,0 +1,121 @@
+export type AudioMode = "vi_only" | "dual_track" | "mix";
+export type DeviceMode = "cpu" | "auto";
+export type Page = "process" | "transcript" | "settings";
+
+export type QueueItemStatus =
+  | "pending"
+  | "running"
+  | "review"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "skipped";
+
+export interface QueueItem {
+  index: number;
+  input: string;
+  output: string;
+  stem: string;
+  status: QueueItemStatus;
+  error?: string | null;
+  code?: string | null;
+  duration_label?: string;
+  size_label?: string;
+  duration_sec?: number;
+  size_bytes?: number;
+}
+
+export interface QueueState {
+  job_id: string;
+  items: QueueItem[];
+}
+
+export interface SegmentRow {
+  id: number;
+  start: number;
+  end: number;
+  text_en: string;
+  text_vi: string;
+}
+
+export interface FriendlyError {
+  title: string;
+  body: string;
+  hint?: string;
+}
+
+export interface EngineEvent {
+  type: string;
+  ts?: string;
+  stage?: string;
+  message?: string;
+  current?: number;
+  total?: number;
+  code?: string;
+  input?: string;
+  output?: string;
+  job_id?: string;
+  stem?: string;
+  segments?: SegmentRow[];
+  queue?: QueueState;
+  level?: string;
+  fatal?: boolean;
+  friendly?: FriendlyError;
+  [key: string]: unknown;
+}
+
+export interface JobOptions {
+  files: string[];
+  outputDir: string;
+  voice: string;
+  model: string;
+  audioMode: AudioMode;
+  mixDb: number;
+  review: boolean;
+  force: boolean;
+  preferGpu: boolean;
+}
+
+export interface WhisperModelInfo {
+  id: string;
+  label: string;
+  size_mb: number;
+  speed: string;
+  quality: string;
+  recommended_for: string;
+  recommended?: boolean;
+  downloaded: boolean;
+  local_mb: number;
+  download_root: string;
+}
+
+export interface AppSettings {
+  whisper_model: string;
+  device_mode: DeviceMode;
+  default_output_dir: string;
+  cleanup_temps: boolean;
+  mix_original_db: number;
+  voice: string;
+  audio_mode: AudioMode;
+  review_by_default: boolean;
+  translate_provider: string;
+  tts_provider: string;
+}
+
+export interface ProbeInfo {
+  path: string;
+  name: string;
+  stem: string;
+  size_bytes: number;
+  size_label: string;
+  duration_sec: number;
+  duration_label: string;
+  error?: string | null;
+}
+
+export interface DoctorReport {
+  ok: boolean;
+  checks: { name: string; ok: boolean; path?: string; error?: string; free_mb?: number }[];
+  models?: WhisperModelInfo[];
+  privacy?: Record<string, unknown>;
+}

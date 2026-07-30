@@ -1,0 +1,7 @@
+# Optional NVIDIA CUDA 12 wheels for faster-whisper on Windows.
+# Do NOT include in the default CPU installer.
+# Install only when shipping a GPU build or for local GPU development:
+#   pip install -r engine/requirements-gpu-nvidia.txt
+-r requirements-base.txt
+nvidia-cublas-cu12
+nvidia-cudnn-cu12

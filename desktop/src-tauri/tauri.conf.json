@@ -1,0 +1,56 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Dub VI",
+  "version": "0.1.0",
+  "identifier": "app.dubvi.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Dub VI",
+        "width": 1120,
+        "height": 820,
+        "resizable": true,
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "Dub VI Community",
+    "copyright": "Copyright (c) Dub VI contributors",
+    "category": "Utility",
+    "shortDescription": "Vietnamese narration for videos",
+    "longDescription": "Dub English (or other) videos into Vietnamese narration on your PC. Whisper and FFmpeg run locally.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/henry.w@example.net",
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
+    "resources": [
+      "resources/bin/ffmpeg.exe",
+      "resources/bin/ffprobe.exe"
+    ],
+    "externalBin": [
+      "binaries/DubVIEngine"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false
+      }
+    }
+  },
+  "plugins": {}
+}
