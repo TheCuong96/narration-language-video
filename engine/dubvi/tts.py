@@ -68,12 +68,16 @@ async def synthesize_all(
     *,
     voice: str,
     cancel: CancellationToken | None = None,
+    tracker=None,
 ) -> dict[int, Path]:
     """Generate MP3 per segment; skip existing valid files (resume)."""
     seg_dir.mkdir(parents=True, exist_ok=True)
-    events.stage(Stage.TTS, f"Đang tạo giọng đọc ({len(segments)} đoạn)")
+    if tracker:
+        tracker.begin_stage(Stage.TTS, f"Đang tạo giọng đọc ({len(segments)} đoạn)")
+    else:
+        events.stage(Stage.TTS, f"Đang tạo giọng đọc ({len(segments)} đoạn)")
     paths: dict[int, Path] = {}
-    total = len(segments)
+    total = max(len(segments), 1)
     failures = 0
 
     for i, s in enumerate(segments):
@@ -82,6 +86,8 @@ async def synthesize_all(
         text = (s.text_vi or s.text_en or "").strip()
         mp3 = seg_dir / f"{s.id:04d}.mp3"
         if not text:
+            if tracker:
+                tracker.emit(i + 1, total, f"Bỏ qua đoạn trống {i + 1}/{total}")
             continue
         if mp3.exists() and mp3.stat().st_size >= MIN_MP3_BYTES:
             paths[s.id] = mp3
@@ -94,8 +100,11 @@ async def synthesize_all(
                 events.error(e.code, f"Đoạn {s.id}: {e.message}", fatal=False)
                 log.error("TTS give up seg %s: %s", s.id, e)
 
-        if (i + 1) % 5 == 0 or i + 1 == total:
-            events.progress(Stage.TTS, i + 1, total, f"TTS {i + 1}/{total}")
+        msg = f"Tạo giọng {i + 1}/{total} đoạn"
+        if tracker:
+            tracker.emit(i + 1, total, msg)
+        elif (i + 1) % 5 == 0 or i + 1 == total:
+            events.progress(Stage.TTS, i + 1, total, msg)
 
     if failures and failures == total:
         raise EngineError(ErrorCode.TTS_FAILED, "Tất cả đoạn TTS đều thất bại")

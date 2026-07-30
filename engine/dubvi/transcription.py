@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import cache, events
 from .jobs import CancellationToken
 from .models import DeviceInfo, ErrorCode, Segment, Stage
 from .system_info import EngineError, add_nvidia_dll_dirs, get_logger, resolve_device
+
+if TYPE_CHECKING:
+    from .progress import ProgressTracker
 
 log = get_logger("dubvi.transcription")
 
@@ -109,16 +113,26 @@ def transcribe(
     *,
     source_lang: str = "en",
     cancel: CancellationToken | None = None,
+    tracker: ProgressTracker | None = None,
+    duration_sec: float = 0.0,
 ) -> list[Segment]:
     cached = cache.load_segments(transcript_path)
     if cached is not None:
         events.log(f"Dùng cache transcript: {transcript_path.name}")
+        if tracker:
+            tracker.begin_stage(Stage.TRANSCRIBING, "Dùng cache nhận dạng")
+            tracker.emit(1, 1, "Đã có transcript trong cache")
         return cached
 
     if cancel:
         cancel.check()
 
-    events.stage(Stage.TRANSCRIBING, "Đang nhận dạng lời nói")
+    if tracker:
+        tracker.begin_stage(Stage.TRANSCRIBING, "Đang nhận dạng lời nói (Whisper)…")
+        tracker.emit(0, 100, "Whisper đang khởi động / phân tích audio…")
+    else:
+        events.stage(Stage.TRANSCRIBING, "Đang nhận dạng lời nói")
+
     kwargs: dict = {
         "vad_filter": True,
         "vad_parameters": dict(min_silence_duration_ms=400),
@@ -135,8 +149,13 @@ def transcribe(
     events.log(
         f"Ngôn ngữ phát hiện: {info.language} (prob={info.language_probability:.2f})"
     )
+    if tracker:
+        tracker.emit(5, 100, f"Đã phát hiện ngôn ngữ: {info.language}")
 
     segments: list[Segment] = []
+    last_pct = -1
+    duration = max(float(duration_sec or 0), 0.0)
+
     for seg in segments_iter:
         if cancel:
             cancel.check()
@@ -151,11 +170,25 @@ def transcribe(
                 text_en=text,
             )
         )
-        if len(segments) % 10 == 0:
+        # Prefer timeline progress over segment-count (count grows unbounded)
+        if duration > 0:
+            pct = int(max(5, min(99, (float(seg.end) / duration) * 100)))
+        else:
+            pct = min(99, 5 + len(segments))  # coarse fallback
+
+        if tracker:
+            if pct != last_pct and (pct % 2 == 0 or len(segments) % 5 == 0):
+                last_pct = pct
+                tracker.emit(
+                    pct,
+                    100,
+                    f"Nhận dạng ~{pct}% · {len(segments)} đoạn · {seg.end:.0f}s",
+                )
+        elif len(segments) % 10 == 0:
             events.progress(
                 Stage.TRANSCRIBING,
-                len(segments),
-                max(len(segments), 1),
+                pct if duration > 0 else len(segments),
+                100 if duration > 0 else max(len(segments), 1),
                 f"Đã nhận {len(segments)} đoạn",
             )
 
@@ -163,5 +196,8 @@ def transcribe(
         raise EngineError(ErrorCode.TRANSCRIBE_FAILED, "Không nhận được đoạn lời nói nào")
 
     cache.save_segments(transcript_path, segments)
-    events.progress(Stage.TRANSCRIBING, len(segments), len(segments), "Xong nhận dạng")
+    if tracker:
+        tracker.emit(100, 100, f"Xong nhận dạng · {len(segments)} đoạn")
+    else:
+        events.progress(Stage.TRANSCRIBING, len(segments), len(segments), "Xong nhận dạng")
     return segments

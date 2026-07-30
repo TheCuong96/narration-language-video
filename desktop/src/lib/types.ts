@@ -51,6 +51,12 @@ export interface EngineEvent {
   message?: string;
   current?: number;
   total?: number;
+  percent?: number;
+  overall_percent?: number;
+  stage_label?: string;
+  file?: string;
+  file_index?: number;
+  file_total?: number;
   code?: string;
   input?: string;
   output?: string;

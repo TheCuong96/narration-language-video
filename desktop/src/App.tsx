@@ -91,9 +91,16 @@ export default function App() {
   const [fileProgress, setFileProgress] = useState({
     current: 0,
     total: 0,
+    percent: 0,
     message: "",
+    stageLabel: "",
   });
-  const [overallProgress, setOverallProgress] = useState({ current: 0, total: 0 });
+  const [overallProgress, setOverallProgress] = useState({
+    percent: 0,
+    fileIndex: 0,
+    fileTotal: 0,
+    fileName: "",
+  });
   const [reviewStem, setReviewStem] = useState<string | null>(null);
   const [segments, setSegments] = useState<SegmentRow[]>([]);
   const [errOpen, setErrOpen] = useState(false);
@@ -128,23 +135,51 @@ export default function App() {
         });
       }
       if (ev.type === "stage") {
-        setStageLabel(ev.message || ev.stage || "");
+        setStageLabel(ev.message || (ev.stage_label as string) || ev.stage || "");
       }
       if (ev.type === "progress") {
-        if (ev.stage === "queued") {
-          setOverallProgress({
-            current: ev.current || 0,
-            total: ev.total || 0,
-          });
-        } else if (ev.stage === "downloading_model") {
-          setDownloadPct(ev.current || 0);
+        if (ev.stage === "downloading_model") {
+          setDownloadPct(
+            typeof ev.percent === "number" ? ev.percent : ev.current || 0,
+          );
         } else {
+          const stagePct =
+            typeof ev.percent === "number"
+              ? ev.percent
+              : ev.total
+                ? Math.round((100 * (ev.current || 0)) / ev.total)
+                : 0;
+          const overallPct =
+            typeof ev.overall_percent === "number"
+              ? ev.overall_percent
+              : stagePct;
           setFileProgress({
             current: ev.current || 0,
             total: ev.total || 0,
+            percent: stagePct,
             message: ev.message || ev.stage || "",
+            stageLabel: (ev.stage_label as string) || ev.stage || "",
           });
+          setOverallProgress({
+            percent: overallPct,
+            fileIndex: (ev.file_index as number) || 0,
+            fileTotal: (ev.file_total as number) || 0,
+            fileName: (ev.file as string) || "",
+          });
+          if (ev.message || ev.stage_label) {
+            setStageLabel(
+              String(ev.message || ev.stage_label || ev.stage || ""),
+            );
+          }
         }
+      }
+      if (ev.type === "file_completed") {
+        setFileProgress((p) => ({ ...p, percent: 100, message: "Xong file này" }));
+      }
+      if (ev.type === "completed") {
+        setOverallProgress((p) => ({ ...p, percent: 100 }));
+        setFileProgress((p) => ({ ...p, percent: 100, message: "Hoàn tất" }));
+        setStageLabel("Hoàn tất");
       }
       if (ev.type === "review_ready" && ev.stem && ev.segments) {
         setReviewStem(ev.stem);
@@ -287,8 +322,19 @@ export default function App() {
     }
     setBusy(true);
     setLogs([]);
-    setFileProgress({ current: 0, total: 0, message: "" });
-    setOverallProgress({ current: 0, total: files.length });
+    setFileProgress({
+      current: 0,
+      total: 0,
+      percent: 0,
+      message: "Đang khởi động…",
+      stageLabel: "",
+    });
+    setOverallProgress({
+      percent: 0,
+      fileIndex: 1,
+      fileTotal: files.length,
+      fileName: "",
+    });
     try {
       const id = await startJob(
         {

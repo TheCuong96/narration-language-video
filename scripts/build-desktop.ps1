@@ -39,11 +39,12 @@ Write-Host "=== 3) Desktop (Tauri) ===" -ForegroundColor Cyan
 Set-Location (Join-Path $Root "desktop")
 if (-not (Test-Path "node_modules")) { npm install }
 npm run tauri build
+if ($LASTEXITCODE -ne 0) { throw "tauri build failed" }
 
 $bundleDir = Join-Path $Root "desktop\src-tauri\target\release\bundle\nsis"
 $setup = Get-ChildItem -Path $bundleDir -Filter "*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $setup) {
-    Write-Warning "NSIS bundle not found under $bundleDir — check tauri build output."
+    Write-Warning "NSIS bundle not found under $bundleDir - check tauri build output."
     Write-Host "Expected artifact name: DubVI_${Version}_x64-setup.exe"
     exit 1
 }

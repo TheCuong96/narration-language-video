@@ -23,6 +23,7 @@ from .system_info import (
     setup_logging,
 )
 from .ffmpeg import probe_duration
+from .progress import ProgressTracker
 
 log = get_logger("dubvi.pipeline")
 
@@ -60,6 +61,9 @@ def process_one(
     cfg: JobConfig,
     job_root: Path,
     cancel: CancellationToken,
+    *,
+    file_index: int = 0,
+    file_total: int = 1,
 ) -> Path | None:
     """
     Process a single video sequentially.
@@ -68,17 +72,23 @@ def process_one(
     name = video.stem
     work = video_work_dir(job_root, name)
     output = queue.output_path_for(video, cfg.output_dir)
+    tracker = ProgressTracker(
+        file_index=file_index,
+        file_total=max(file_total, 1),
+        file_name=video.name,
+    )
 
     if output.exists() and not cfg.force and cfg.start_from == StartFrom.AUTO:
         events.log(f"Bỏ qua (đã có): {output.name}")
         events.file_completed(str(video), str(output), skipped=True)
         queue.update_item(cfg.job_id, name, status=QueueItemStatus.SKIPPED, output=str(output))
+        tracker.complete_file()
         return output
 
     if cfg.force and cfg.start_from == StartFrom.AUTO:
         cache.clear_downstream(work, keep_en=True)
 
-    events.stage(Stage.INIT, f"Bắt đầu: {video.name}", file=video.name)
+    tracker.begin_stage(Stage.INIT, f"Bắt đầu: {video.name}")
     queue.update_item(cfg.job_id, name, status=QueueItemStatus.RUNNING)
     t0 = time.time()
     cancel.check()
@@ -86,6 +96,7 @@ def process_one(
     ensure_disk_space(video, work, cfg.output_dir)
     duration = probe_duration(video)
     events.log(f"Độ dài: {duration / 60:.1f} phút")
+    tracker.emit(1, 1, f"Độ dài {duration / 60:.1f} phút")
 
     # --- extract ---
     if cfg.start_from == StartFrom.EXTRACT or not _should_skip_extract(work, cfg.start_from):
@@ -93,9 +104,11 @@ def process_one(
             flac = work / cache.AUDIO_FLAC
             if flac.exists():
                 flac.unlink()
-        flac = audio.extract_for_whisper(video, work)
+        flac = audio.extract_for_whisper(video, work, tracker=tracker)
     else:
         flac = work / cache.AUDIO_FLAC
+        tracker.begin_stage(Stage.EXTRACTING, "Dùng cache âm thanh")
+        tracker.emit(1, 1, "Đã có audio.flac")
         events.log("Dùng cache audio.flac")
     cancel.check()
 
@@ -108,6 +121,8 @@ def process_one(
         work / cache.TRANSCRIPT_EN
     ).exists():
         segments = cache.load_segments(work / cache.TRANSCRIPT_EN) or []
+        tracker.begin_stage(Stage.TRANSCRIBING, "Dùng cache nhận dạng")
+        tracker.emit(1, 1, f"Cache: {len(segments)} đoạn")
         events.log("Dùng cache transcript tiếng Anh")
     else:
         segments = transcription.transcribe(
@@ -116,6 +131,8 @@ def process_one(
             model,
             source_lang=cfg.source_lang,
             cancel=cancel,
+            tracker=tracker,
+            duration_sec=duration,
         )
     events.log(f"Số đoạn: {len(segments)}")
     cancel.check()
@@ -126,6 +143,8 @@ def process_one(
 
     if cfg.start_from in (StartFrom.TTS, StartFrom.MUX) and _has_vi(work):
         segments_vi = cache.load_segments(work / cache.TRANSCRIPT_VI) or []
+        tracker.begin_stage(Stage.TRANSLATING, "Dùng cache bản dịch")
+        tracker.emit(1, 1, f"Cache: {len(segments_vi)} đoạn")
         events.log("Dùng cache bản dịch tiếng Việt")
     else:
         segments_vi = translation.translate_segments(
@@ -135,6 +154,7 @@ def process_one(
             target_lang=cfg.target_lang,
             terms=cfg.terms,
             cancel=cancel,
+            tracker=tracker,
         )
 
     script_path = work / cache.SCRIPT_VI
@@ -144,7 +164,8 @@ def process_one(
     # --- review pause ---
     if cfg.review_translation or cfg.translate_only:
         payload = review.get_review_payload(cfg.job_id, name)
-        events.stage(Stage.REVIEW, "Chờ xem / sửa bản dịch")
+        tracker.begin_stage(Stage.REVIEW, "Chờ xem / sửa bản dịch")
+        tracker.emit(1, 1, "Tạm dừng để review transcript")
         events.review_ready(
             job_id=cfg.job_id,
             stem=name,
@@ -169,6 +190,7 @@ def process_one(
         cfg=cfg,
         cancel=cancel,
         t0=t0,
+        tracker=tracker,
     )
 
 
@@ -182,14 +204,19 @@ def _finish_from_tts(
     cfg: JobConfig,
     cancel: CancellationToken,
     t0: float,
+    tracker: ProgressTracker | None = None,
 ) -> Path:
     cancel.check()
     if cfg.start_from == StartFrom.MUX and (work / cache.NARRATION).exists():
         narration = work / cache.NARRATION
         events.log("Dùng cache narration.wav")
+        if tracker:
+            tracker.begin_stage(Stage.TTS, "Dùng cache narration")
+            tracker.emit(1, 1, "Đã có narration.wav")
+            tracker.begin_stage(Stage.ALIGNING, "Bỏ qua căn giờ (đã có narration)")
+            tracker.emit(1, 1, "OK")
     else:
         if cfg.start_from == StartFrom.TTS:
-            # Force regenerate voice
             for dname in (cache.SEGMENTS_DIR, cache.FITTED_DIR):
                 d = work / dname
                 if d.exists():
@@ -206,6 +233,7 @@ def _finish_from_tts(
                 work / cache.SEGMENTS_DIR,
                 voice=cfg.voice,
                 cancel=cancel,
+                tracker=tracker,
             )
         )
         cancel.check()
@@ -215,6 +243,7 @@ def _finish_from_tts(
             duration,
             mp3_paths,
             cancel=cancel,
+            tracker=tracker,
         )
 
     cancel.check()
@@ -225,11 +254,20 @@ def _finish_from_tts(
         audio_mode=cfg.audio_mode,
         mix_original_db=cfg.mix_original_db,
         allow_reencode=cfg.allow_reencode,
+        tracker=tracker,
     )
 
     if cfg.cleanup_on_success:
-        events.stage(Stage.CLEANUP, "Dọn file tạm")
+        if tracker:
+            tracker.begin_stage(Stage.CLEANUP, "Dọn file tạm")
+        else:
+            events.stage(Stage.CLEANUP, "Dọn file tạm")
         cache.cleanup_temps_after_success(work, keep_transcripts=True)
+        if tracker:
+            tracker.emit(1, 1, "Đã dọn tạm")
+
+    if tracker:
+        tracker.complete_file()
 
     elapsed = (time.time() - t0) / 60
     events.log(f"Xong {video.name} → {output.name} ({elapsed:.1f} phút)")
@@ -284,6 +322,17 @@ def continue_stem(cfg: JobConfig, stem: str) -> int:
         duration = probe_duration(video)
         output = Path(item["output"])
         queue.update_item(jid, stem, status=QueueItemStatus.RUNNING)
+        tracker = ProgressTracker(file_index=0, file_total=1, file_name=video.name)
+        # Assume earlier stages done when continuing from review
+        for st in (
+            Stage.INIT,
+            Stage.EXTRACTING,
+            Stage.TRANSCRIBING,
+            Stage.TRANSLATING,
+            Stage.REVIEW,
+        ):
+            tracker.begin_stage(st, f"(đã xong) {st.value}")
+            tracker.emit(1, 1, "OK")
         _finish_from_tts(
             video=video,
             work=work,
@@ -293,6 +342,7 @@ def continue_stem(cfg: JobConfig, stem: str) -> int:
             cfg=cfg,
             cancel=cancel,
             t0=time.time(),
+            tracker=tracker,
         )
         update_job_state(jid, status="completed")
         events.completed(str(output), job_id=jid, stem=stem)
@@ -372,7 +422,18 @@ def run_job(cfg: JobConfig) -> int:
         last_output: str | None = None
 
         for idx, video in enumerate(videos):
-            events.progress(Stage.QUEUED, idx + 1, len(videos), f"Hàng đợi {idx + 1}/{len(videos)}")
+            events.progress(
+                Stage.QUEUED,
+                idx,
+                len(videos),
+                f"Bắt đầu video {idx + 1}/{len(videos)}: {video.name}",
+                percent=0 if len(videos) else 0,
+                overall_percent=round(100.0 * idx / max(len(videos), 1), 1),
+                file=video.name,
+                file_index=idx + 1,
+                file_total=len(videos),
+                stage_label="Hàng đợi",
+            )
             try:
                 cancel.check()
                 # Lazy-load model if first file that needs it
@@ -381,7 +442,15 @@ def run_job(cfg: JobConfig) -> int:
                         cfg.whisper_model,
                         prefer_gpu=cfg.prefer_gpu,
                     )
-                out = process_one(video, model, cfg, job_root, cancel)
+                out = process_one(
+                    video,
+                    model,
+                    cfg,
+                    job_root,
+                    cancel,
+                    file_index=idx,
+                    file_total=len(videos),
+                )
                 if out is None:
                     review_paused.append(video.stem)
                 else:

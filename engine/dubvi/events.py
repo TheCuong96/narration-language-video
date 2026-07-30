@@ -52,12 +52,16 @@ def progress(
     **extra: Any,
 ) -> None:
     name = stage_name.value if isinstance(stage_name, Stage) else stage_name
+    total_safe = max(int(total), 1)
+    current_safe = max(0, min(int(current), total_safe))
+    if "percent" not in extra:
+        extra["percent"] = round(100.0 * current_safe / total_safe, 1)
     emit(
         {
             "type": "progress",
             "stage": name,
-            "current": current,
-            "total": total,
+            "current": current_safe,
+            "total": total_safe,
             "message": message,
             **extra,
         }

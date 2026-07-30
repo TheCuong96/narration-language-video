@@ -79,17 +79,27 @@ def translate_segments(
     target_lang: str,
     terms: list[str],
     cancel: CancellationToken | None = None,
+    tracker=None,
 ) -> list[Segment]:
     cached = cache.load_segments(out_path)
     if cached is not None and len(cached) == len(segments) and all(s.text_vi for s in cached):
         events.log(f"Dùng cache bản dịch: {out_path.name}")
+        if tracker:
+            tracker.begin_stage(Stage.TRANSLATING, "Dùng cache bản dịch")
+            tracker.emit(1, 1, "Đã có bản dịch trong cache")
         return cached
 
     from .providers import get_translate_provider
 
     src = "auto" if source_lang in ("", "auto") else source_lang
     translator = get_translate_provider("deep-translator")
-    events.stage(Stage.TRANSLATING, f"Đang dịch {len(segments)} đoạn ({src} → {target_lang})")
+    if tracker:
+        tracker.begin_stage(
+            Stage.TRANSLATING,
+            f"Đang dịch {len(segments)} đoạn ({src} → {target_lang})",
+        )
+    else:
+        events.stage(Stage.TRANSLATING, f"Đang dịch {len(segments)} đoạn ({src} → {target_lang})")
     events.log(translator.privacy_note())
 
     # Resume: reuse already-translated segments
@@ -129,9 +139,14 @@ def translate_segments(
             )
             time.sleep(0.25)
 
-        if (i + 1) % 5 == 0 or i + 1 == total:
-            events.progress(Stage.TRANSLATING, i + 1, total, f"Đã dịch {i + 1}/{total}")
-            cache.save_segments(out_path, result)
+        if (i + 1) % 1 == 0 or i + 1 == total:
+            msg = f"Đã dịch {i + 1}/{total} đoạn"
+            if tracker:
+                tracker.emit(i + 1, total, msg)
+            else:
+                events.progress(Stage.TRANSLATING, i + 1, total, msg)
+            if (i + 1) % 5 == 0 or i + 1 == total:
+                cache.save_segments(out_path, result)
 
     cache.save_segments(out_path, result)
     return result

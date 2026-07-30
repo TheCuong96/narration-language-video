@@ -20,11 +20,18 @@ from .system_info import get_logger
 log = get_logger("dubvi.audio")
 
 
-def extract_for_whisper(video: Path, work: Path) -> Path:
+def extract_for_whisper(video: Path, work: Path, tracker=None) -> Path:
     flac = work / cache.AUDIO_FLAC
-    events.stage(Stage.EXTRACTING, "Đang tách âm thanh (FLAC)")
+    if tracker:
+        tracker.begin_stage(Stage.EXTRACTING, "Đang tách âm thanh (FLAC)")
+        tracker.emit(0, 1, "FFmpeg đang tách audio…")
+    else:
+        events.stage(Stage.EXTRACTING, "Đang tách âm thanh (FLAC)")
     extract_audio_flac(video, flac)
-    events.progress(Stage.EXTRACTING, 1, 1, "Đã tách âm thanh")
+    if tracker:
+        tracker.emit(1, 1, "Đã tách âm thanh")
+    else:
+        events.progress(Stage.EXTRACTING, 1, 1, "Đã tách âm thanh")
     return flac
 
 
@@ -35,6 +42,7 @@ def build_narration(
     mp3_paths: dict[int, Path],
     *,
     cancel: CancellationToken | None = None,
+    tracker=None,
 ) -> Path:
     """
     Build full narration WAV aligned to original timestamps.
@@ -49,7 +57,10 @@ def build_narration(
 
     fitted_dir = work / cache.FITTED_DIR
     fitted_dir.mkdir(parents=True, exist_ok=True)
-    events.stage(Stage.ALIGNING, "Đang căn thời gian giọng đọc")
+    if tracker:
+        tracker.begin_stage(Stage.ALIGNING, "Đang căn thời gian giọng đọc")
+    else:
+        events.stage(Stage.ALIGNING, "Đang căn thời gian giọng đọc")
 
     pieces: list[Path] = []
     cursor = 0.0
@@ -100,7 +111,9 @@ def build_narration(
             pieces.append(fitted)
             cursor = end
 
-        if (idx + 1) % 10 == 0 or idx + 1 == total:
+        if tracker:
+            tracker.emit(idx + 1, max(total, 1), f"Căn thời gian {idx + 1}/{total}")
+        elif (idx + 1) % 10 == 0 or idx + 1 == total:
             events.progress(Stage.ALIGNING, idx + 1, total)
 
     if cursor < video_duration - 0.05:
@@ -113,7 +126,10 @@ def build_narration(
 
     list_file = work / "concat.txt"
     concat_wavs(pieces, list_file, narration)
-    events.progress(Stage.ALIGNING, total, total, "Đã căn thời gian")
+    if tracker:
+        tracker.emit(max(total, 1), max(total, 1), "Đã căn thời gian")
+    else:
+        events.progress(Stage.ALIGNING, total, total, "Đã căn thời gian")
     return narration
 
 
@@ -125,9 +141,14 @@ def mux(
     audio_mode: AudioMode | str = AudioMode.VI_ONLY,
     mix_original_db: float = -18.0,
     allow_reencode: bool = True,
+    tracker=None,
 ) -> None:
     mode = audio_mode.value if isinstance(audio_mode, AudioMode) else audio_mode
-    events.stage(Stage.MUXING, f"Đang ghép video ({mode}) → {output.name}")
+    if tracker:
+        tracker.begin_stage(Stage.MUXING, f"Đang ghép video ({mode}) → {output.name}")
+        tracker.emit(0, 1, "FFmpeg đang ghép…")
+    else:
+        events.stage(Stage.MUXING, f"Đang ghép video ({mode}) → {output.name}")
     mux_video(
         video,
         narration,
@@ -136,4 +157,7 @@ def mux(
         mix_original_db=mix_original_db,
         allow_reencode=allow_reencode,
     )
-    events.progress(Stage.MUXING, 1, 1, "Ghép xong")
+    if tracker:
+        tracker.emit(1, 1, "Ghép xong")
+    else:
+        events.progress(Stage.MUXING, 1, 1, "Ghép xong")

@@ -1,6 +1,13 @@
 import { useMemo, type DragEvent } from "react";
 import type { AudioMode, QueueItem } from "../lib/types";
-import { estimateEta, formatElapsed } from "../hooks/useElapsed";
+import { formatElapsed } from "../hooks/useElapsed";
+
+function etaFromOverall(elapsedSec: number, overallPct: number): string | null {
+  if (overallPct < 3 || elapsedSec < 8) return null;
+  const remain = Math.round((elapsedSec * (100 - overallPct)) / overallPct);
+  if (remain < 0 || remain > 24 * 3600) return null;
+  return formatElapsed(remain);
+}
 
 const VOICES = [
   { id: "vi-VN-HoaiMyNeural", label: "Nữ — Hoài My" },
@@ -34,8 +41,19 @@ interface Props {
   preferGpu: boolean;
   busy: boolean;
   stageLabel: string;
-  fileProgress: { current: number; total: number; message: string };
-  overallProgress: { current: number; total: number };
+  fileProgress: {
+    current: number;
+    total: number;
+    percent: number;
+    message: string;
+    stageLabel: string;
+  };
+  overallProgress: {
+    percent: number;
+    fileIndex: number;
+    fileTotal: number;
+    fileName: string;
+  };
   elapsedSec: number;
   dragOver: boolean;
   onDragOver: (e: DragEvent) => void;
@@ -102,22 +120,13 @@ export function ProcessPage(props: Props) {
     return `${files.length} video đã chọn`;
   }, [files]);
 
-  const completed = queue.filter((q) =>
-    ["completed", "skipped"].includes(q.status),
-  ).length;
-  const eta = estimateEta(elapsedSec, completed, queue.length || files.length);
-
-  const overallPct =
-    overallProgress.total > 0
-      ? Math.round((100 * overallProgress.current) / overallProgress.total)
-      : queue.length
-        ? Math.round((100 * completed) / queue.length)
-        : 0;
-
-  const filePct =
-    fileProgress.total > 0
-      ? Math.round((100 * fileProgress.current) / fileProgress.total)
-      : 0;
+  const totalFiles = overallProgress.fileTotal || queue.length || files.length;
+  const overallPct = Math.max(
+    0,
+    Math.min(100, Math.round(overallProgress.percent || 0)),
+  );
+  const filePct = Math.max(0, Math.min(100, Math.round(fileProgress.percent || 0)));
+  const eta = etaFromOverall(elapsedSec, overallPct);
 
   return (
     <>
@@ -244,16 +253,43 @@ export function ProcessPage(props: Props) {
               </>
             ) : null}
           </div>
-          <label className="bar-label">Tổng ({overallPct}%)</label>
+          {(overallProgress.fileName || overallProgress.fileIndex > 0) && (
+            <div className="meta-line">
+              File{" "}
+              <strong>
+                {overallProgress.fileIndex || "—"}/{totalFiles || "—"}
+              </strong>
+              {overallProgress.fileName ? ` · ${overallProgress.fileName}` : ""}
+            </div>
+          )}
+          <label className="bar-label">
+            Tổng toàn job: <strong>{overallPct}%</strong>
+          </label>
           <div className="bar">
             <i style={{ width: `${overallPct}%` }} />
           </div>
           <label className="bar-label">
-            Công đoạn ({filePct}%) — {fileProgress.message}
+            Công đoạn hiện tại:{" "}
+            <strong>
+              {fileProgress.stageLabel || "—"} · {filePct}%
+            </strong>
+            {fileProgress.total > 0
+              ? ` (${fileProgress.current}/${fileProgress.total})`
+              : ""}
           </label>
           <div className="bar thin">
             <i style={{ width: `${filePct}%` }} />
           </div>
+          {fileProgress.message ? (
+            <div className="progress-detail">{fileProgress.message}</div>
+          ) : null}
+          <ul className="stage-legend">
+            <li>Tách audio ~5%</li>
+            <li>Whisper ~40%</li>
+            <li>Dịch ~15%</li>
+            <li>TTS ~25%</li>
+            <li>Căn giờ + ghép ~13%</li>
+          </ul>
         </section>
       </div>
 
