@@ -1,0 +1,6 @@
+faster-whisper>=1.1.0
+edge-tts>=6.1.0
+deep-translator>=1.11.4
+# Optional GPU acceleration on Windows (CUDA 12):
+nvidia-cublas-cu12
+nvidia-cudnn-cu12
