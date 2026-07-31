@@ -17,6 +17,8 @@ interface Props {
   downloading: string | null;
   downloadPct: number;
   xttsSpeakers: XttsSpeakerOption[];
+  /** When true, freeze all setting controls until the job finishes/stops. */
+  busy?: boolean;
   onChange: (s: AppSettings) => void;
   onSave: () => Promise<void>;
   onDoctor: () => void;
@@ -137,6 +139,7 @@ export function SettingsPage({
   downloading,
   downloadPct,
   xttsSpeakers,
+  busy = false,
   onChange,
   onSave,
   onDoctor,
@@ -207,7 +210,13 @@ export function SettingsPage({
   return (
     <div className="settings-stack">
       <PrivacyBanner settings={settings} />
+      {busy ? (
+        <p className="settings-lock-note">
+          Đang xử lý video — mọi cài đặt bị khóa đến khi xong hoặc tạm dừng.
+        </p>
+      ) : null}
 
+      <fieldset className="settings-fieldset" disabled={busy}>
       <section className="panel">
         <h2>Cài đặt chung</h2>
         <div className="row">
@@ -463,6 +472,7 @@ export function SettingsPage({
           onDelete={onDelete}
         />
       </section>
+      </fieldset>
     </div>
   );
 }

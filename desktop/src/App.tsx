@@ -366,6 +366,7 @@ export default function App() {
   }
 
   async function onPickFiles() {
+    if (busy) return;
     try {
       const picked = await pickVideos();
       if (picked?.length) await addFiles(picked);
@@ -375,6 +376,7 @@ export default function App() {
   }
 
   async function onPickOut() {
+    if (busy) return;
     try {
       const dir = await pickOutputDir();
       if (dir) setOutputDir(dir);
@@ -386,6 +388,7 @@ export default function App() {
   function onBrowserDrop(e: DragEvent) {
     e.preventDefault();
     setDragOver(false);
+    if (busy) return;
     const list = filterVideoFiles(e.dataTransfer.files);
     if (!list.length) return;
     pushLog({
@@ -660,6 +663,7 @@ export default function App() {
           downloading={downloading}
           downloadPct={downloadPct}
           xttsSpeakers={xttsSpeakers}
+          busy={busy}
           onChange={setSettings}
           onSave={async () => {
             try {
