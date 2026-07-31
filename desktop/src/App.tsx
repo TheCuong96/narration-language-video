@@ -94,6 +94,7 @@ export default function App() {
     percent: 0,
     message: "",
     stageLabel: "",
+    stage: "",
   });
   const [overallProgress, setOverallProgress] = useState({
     percent: 0,
@@ -101,6 +102,8 @@ export default function App() {
     fileTotal: 0,
     fileName: "",
   });
+  /** Wall-clock seconds for each completed file in the current job. */
+  const [completedElapsedSec, setCompletedElapsedSec] = useState<number[]>([]);
   const [reviewStem, setReviewStem] = useState<string | null>(null);
   const [segments, setSegments] = useState<SegmentRow[]>([]);
   const [errOpen, setErrOpen] = useState(false);
@@ -163,6 +166,7 @@ export default function App() {
             percent: stagePct,
             message: ev.message || ev.stage || "",
             stageLabel: (ev.stage_label as string) || ev.stage || "",
+            stage: ev.stage || "",
           });
           setOverallProgress({
             percent: overallPct,
@@ -177,8 +181,20 @@ export default function App() {
           }
         }
       }
+      if (ev.type === "stage" && ev.stage) {
+        setFileProgress((p) => ({
+          ...p,
+          stage: ev.stage || p.stage,
+          stageLabel: (ev.stage_label as string) || p.stageLabel,
+        }));
+      }
       if (ev.type === "file_completed") {
         setFileProgress((p) => ({ ...p, percent: 100, message: "Xong file này" }));
+        const mins = ev.elapsed_min;
+        const skipped = Boolean(ev.skipped);
+        if (typeof mins === "number" && mins > 0 && !skipped) {
+          setCompletedElapsedSec((prev) => [...prev, Math.round(mins * 60)]);
+        }
       }
       if (ev.type === "completed") {
         setOverallProgress((p) => ({ ...p, percent: 100 }));
@@ -363,6 +379,7 @@ export default function App() {
       percent: 0,
       message: "Đang khởi động…",
       stageLabel: "",
+      stage: "",
     });
     setOverallProgress({
       percent: 0,
@@ -370,6 +387,7 @@ export default function App() {
       fileTotal: files.length,
       fileName: "",
     });
+    setCompletedElapsedSec([]);
     try {
       const id = await startJob(
         {
@@ -497,6 +515,7 @@ export default function App() {
           fileProgress={fileProgress}
           overallProgress={overallProgress}
           elapsedSec={elapsedSec}
+          completedElapsedSec={completedElapsedSec}
           dragOver={dragOver}
           onDragOver={(e) => {
             e.preventDefault();

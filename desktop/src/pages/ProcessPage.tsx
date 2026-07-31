@@ -1,13 +1,7 @@
 import { useMemo, type DragEvent, type MouseEvent } from "react";
 import type { AudioMode, QueueItem } from "../lib/types";
-import { formatElapsed } from "../hooks/useElapsed";
-
-function etaFromOverall(elapsedSec: number, overallPct: number): string | null {
-  if (overallPct < 3 || elapsedSec < 8) return null;
-  const remain = Math.round((elapsedSec * (100 - overallPct)) / overallPct);
-  if (remain < 0 || remain > 24 * 3600) return null;
-  return formatElapsed(remain);
-}
+import { formatElapsed, useElapsed } from "../hooks/useElapsed";
+import { computeProgressEta } from "../lib/progressEta";
 
 function CheckHelp({ tip }: { tip: string }) {
   const stop = (e: MouseEvent) => {
@@ -67,6 +61,7 @@ interface Props {
     percent: number;
     message: string;
     stageLabel: string;
+    stage: string;
   };
   overallProgress: {
     percent: number;
@@ -75,6 +70,7 @@ interface Props {
     fileName: string;
   };
   elapsedSec: number;
+  completedElapsedSec: number[];
   dragOver: boolean;
   onDragOver: (e: DragEvent) => void;
   onDragLeave: () => void;
@@ -113,6 +109,7 @@ export function ProcessPage(props: Props) {
     fileProgress,
     overallProgress,
     elapsedSec,
+    completedElapsedSec,
     dragOver,
     onDragOver,
     onDragLeave,
@@ -146,7 +143,41 @@ export function ProcessPage(props: Props) {
     Math.min(100, Math.round(overallProgress.percent || 0)),
   );
   const filePct = Math.max(0, Math.min(100, Math.round(fileProgress.percent || 0)));
-  const eta = etaFromOverall(elapsedSec, overallPct);
+  const stageKey = fileProgress.stage || "";
+  const fileIndex = overallProgress.fileIndex || 0;
+
+  const stageElapsedSec = useElapsed(busy && !!stageKey, stageKey);
+  const fileElapsedSec = useElapsed(busy && fileIndex > 0, String(fileIndex));
+
+  const eta = useMemo(
+    () =>
+      computeProgressEta({
+        busy,
+        elapsedSec,
+        stageElapsedSec,
+        fileElapsedSec,
+        overallPct: overallProgress.percent || 0,
+        stagePct: fileProgress.percent || 0,
+        stageKey,
+        fileIndex,
+        fileTotal: totalFiles,
+        queue,
+        completedElapsedSec,
+      }),
+    [
+      busy,
+      elapsedSec,
+      stageElapsedSec,
+      fileElapsedSec,
+      overallProgress.percent,
+      fileProgress.percent,
+      stageKey,
+      fileIndex,
+      totalFiles,
+      queue,
+      completedElapsedSec,
+    ],
+  );
 
   return (
     <>
@@ -269,12 +300,6 @@ export function ProcessPage(props: Props) {
           <div className="stage">{stageLabel || "Sẵn sàng"}</div>
           <div className="meta-line">
             Đã chạy: <strong>{formatElapsed(elapsedSec)}</strong>
-            {eta ? (
-              <>
-                {" "}
-                · Còn khoảng: <strong>{eta}</strong>
-              </>
-            ) : null}
           </div>
           {(overallProgress.fileName || overallProgress.fileIndex > 0) && (
             <div className="meta-line">
@@ -285,8 +310,44 @@ export function ProcessPage(props: Props) {
               {overallProgress.fileName ? ` · ${overallProgress.fileName}` : ""}
             </div>
           )}
+
+          {(eta.stage || eta.file || eta.job) && (
+            <div className="eta-box" aria-live="polite">
+              {eta.stage && (
+                <div className="eta-row">
+                  <span className="eta-k">Công đoạn</span>
+                  <span>
+                    còn <strong>{eta.stage.remainLabel}</strong>
+                    <span className="eta-clock"> · xong ~{eta.stage.finishLabel}</span>
+                  </span>
+                </div>
+              )}
+              {eta.file && (
+                <div className="eta-row">
+                  <span className="eta-k">Video này</span>
+                  <span>
+                    còn <strong>{eta.file.remainLabel}</strong>
+                    <span className="eta-clock"> · xong ~{eta.file.finishLabel}</span>
+                  </span>
+                </div>
+              )}
+              {eta.job && (
+                <div className="eta-row eta-row-total">
+                  <span className="eta-k">
+                    {totalFiles > 1 ? `Tất cả ${totalFiles} video` : "Tổng"}
+                  </span>
+                  <span>
+                    còn <strong>{eta.job.remainLabel}</strong>
+                    <span className="eta-clock"> · xong ~{eta.job.finishLabel}</span>
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
           <label className="bar-label">
             Tổng toàn job: <strong>{overallPct}%</strong>
+            {eta.job ? ` · còn ~${eta.job.remainLabel}` : ""}
           </label>
           <div className="bar">
             <i style={{ width: `${overallPct}%` }} />
@@ -299,6 +360,7 @@ export function ProcessPage(props: Props) {
             {fileProgress.total > 0
               ? ` (${fileProgress.current}/${fileProgress.total})`
               : ""}
+            {eta.stage ? ` · còn ~${eta.stage.remainLabel}` : ""}
           </label>
           <div className="bar thin">
             <i style={{ width: `${filePct}%` }} />
@@ -307,11 +369,25 @@ export function ProcessPage(props: Props) {
             <div className="progress-detail">{fileProgress.message}</div>
           ) : null}
           <ul className="stage-legend">
-            <li>Tách audio ~5%</li>
-            <li>Whisper ~40%</li>
-            <li>Dịch ~15%</li>
-            <li>TTS ~25%</li>
-            <li>Căn giờ + ghép ~13%</li>
+            {eta.legend.map((s) => (
+              <li
+                key={s.key}
+                className={
+                  s.active ? "stage-active" : s.done ? "stage-done" : undefined
+                }
+              >
+                {s.label} ~{s.weight}%
+                {s.estLabel ? (
+                  <>
+                    {" "}
+                    ·{" "}
+                    {s.active && eta.stage
+                      ? `còn ~${eta.stage.remainLabel}`
+                      : `~${s.estLabel}`}
+                  </>
+                ) : null}
+              </li>
+            ))}
           </ul>
         </section>
       </div>

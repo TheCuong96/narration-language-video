@@ -225,6 +225,36 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .stage { font-weight: 700; margin-bottom: 6px; }
 .meta-line { color: var(--muted); font-size: 0.9rem; margin-bottom: 10px; }
+
+.eta-box {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: rgba(12, 107, 88, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.eta-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.88rem;
+  color: var(--ink);
+}
+.eta-row-total {
+  padding-top: 6px;
+  margin-top: 2px;
+  border-top: 1px dashed var(--line);
+  font-weight: 600;
+}
+.eta-k {
+  color: var(--muted);
+  flex-shrink: 0;
+  min-width: 7.5rem;
+}
+.eta-clock { color: var(--muted); font-weight: 400; }
+
 .bar-label { display: block; font-size: 0.82rem; color: var(--muted); margin: 8px 0 4px; }
 .bar {
   height: 10px;
@@ -256,6 +286,15 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   padding: 0;
   font-size: 0.75rem;
   color: var(--muted);
+}
+.stage-legend .stage-active {
+  color: var(--accent-ink);
+  font-weight: 700;
+}
+.stage-legend .stage-done {
+  color: #7a8a96;
+  text-decoration: line-through;
+  text-decoration-color: #b0bec7;
 }
 
 .log {
