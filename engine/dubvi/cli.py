@@ -183,6 +183,7 @@ def _privacy_notice() -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    events.ensure_utf8_stdio()
     parser = _build_parser()
     args = parser.parse_args(argv)
 

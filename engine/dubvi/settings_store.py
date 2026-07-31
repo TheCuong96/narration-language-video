@@ -20,7 +20,7 @@ class AppSettings:
     mix_original_db: float = DEFAULT_MIX_ORIGINAL_DB
     voice: str = DEFAULT_VOICE
     audio_mode: str = AudioMode.VI_ONLY.value
-    review_by_default: bool = True
+    review_by_default: bool = False
     translate_provider: str = "deep-translator"
     tts_provider: str = "edge-tts"
     # Never store API keys in plaintext logs; reserved for future

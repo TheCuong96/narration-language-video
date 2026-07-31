@@ -6,17 +6,54 @@ import json
 import sys
 import threading
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TextIO
 
 from .models import ErrorCode, Stage
 
 _lock = threading.Lock()
 _json_mode = True
+_stdio_utf8_ready = False
 
 
 def set_json_mode(enabled: bool) -> None:
     global _json_mode
     _json_mode = enabled
+
+
+def ensure_utf8_stdio() -> None:
+    """Force UTF-8 on stdout/stderr (Windows/PyInstaller often default to cp1252)."""
+    global _stdio_utf8_ready
+    if _stdio_utf8_ready:
+        return
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+    _stdio_utf8_ready = True
+
+
+def _write_text(stream: TextIO, text: str) -> None:
+    """Write Unicode as UTF-8 bytes; never depend on Windows cp1252 text mode."""
+    buffer = getattr(stream, "buffer", None)
+    if buffer is not None:
+        try:
+            buffer.write(text.encode("utf-8", errors="replace"))
+            buffer.flush()
+            return
+        except Exception:
+            pass
+    try:
+        stream.write(text)
+        stream.flush()
+        return
+    except UnicodeEncodeError:
+        stream.write(text.encode("ascii", errors="backslashreplace").decode("ascii"))
+        stream.flush()
 
 
 def _now() -> str:
@@ -25,18 +62,17 @@ def _now() -> str:
 
 def emit(payload: dict[str, Any]) -> None:
     """Write one JSON object per line to stdout (never mixed with free text)."""
+    ensure_utf8_stdio()
     data = {"ts": _now(), **payload}
-    line = json.dumps(data, ensure_ascii=False)
+    line = json.dumps(data, ensure_ascii=False) + "\n"
     with _lock:
         if _json_mode:
-            sys.stdout.write(line + "\n")
-            sys.stdout.flush()
+            _write_text(sys.stdout, line)
         else:
             # Human-readable fallback for legacy CLI
             t = data.get("type", "")
             msg = data.get("message") or data.get("stage") or ""
-            sys.stderr.write(f"[{t}] {msg}\n")
-            sys.stderr.flush()
+            _write_text(sys.stderr, f"[{t}] {msg}\n")
 
 
 def stage(stage_name: Stage | str, message: str = "", **extra: Any) -> None:

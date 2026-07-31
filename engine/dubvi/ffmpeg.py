@@ -92,16 +92,16 @@ def run_ffmpeg(
     kwargs: dict = {
         "check": check,
         "shell": False,
+        # Always capture stderr so failures include FFmpeg's real message.
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
     }
     if capture:
         kwargs["stdout"] = subprocess.PIPE
-        kwargs["stderr"] = subprocess.PIPE
-        kwargs["text"] = True
-        kwargs["encoding"] = "utf-8"
-        kwargs["errors"] = "replace"
     else:
         kwargs["stdout"] = subprocess.DEVNULL
-        kwargs["stderr"] = subprocess.DEVNULL
     try:
         return subprocess.run(cmd, **kwargs)
     except FileNotFoundError as e:
@@ -109,7 +109,10 @@ def run_ffmpeg(
     except subprocess.CalledProcessError as e:
         err = ""
         if e.stderr:
-            err = e.stderr[-500:] if isinstance(e.stderr, str) else ""
+            err = e.stderr.strip()
+            # Keep the most useful tail (format guess / encoder errors live at end).
+            if len(err) > 800:
+                err = err[-800:]
         raise EngineError(
             ErrorCode.INTERNAL,
             f"FFmpeg thất bại (exit {e.returncode}): {err or cmd[0]}",
@@ -394,7 +397,7 @@ def mux_video(
     else:
         events.log(plan.reason)
 
-    tmp = output.with_suffix(output.suffix + ".partial")
+    tmp = output.with_name(f"{output.stem}.partial{output.suffix}")
     cmd: list[str] = [ffmpeg_path(), "-y", "-i", str(video), "-i", str(narration)]
 
     vcodec_args = (

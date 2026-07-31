@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type DragEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
 import { ErrorDialog } from "./components/ErrorDialog";
 import {
   cancelJob,
@@ -43,7 +43,7 @@ const defaultSettings: AppSettings = {
   mix_original_db: -18,
   voice: "vi-VN-HoaiMyNeural",
   audio_mode: "vi_only",
-  review_by_default: true,
+  review_by_default: false,
   translate_provider: "deep-translator",
   tts_provider: "edge-tts",
 };
@@ -80,7 +80,7 @@ export default function App() {
   const [model, setModel] = useState(defaultSettings.whisper_model);
   const [audioMode, setAudioMode] = useState<AudioMode>("vi_only");
   const [mixDb, setMixDb] = useState(-18);
-  const [review, setReview] = useState(true);
+  const [review, setReview] = useState(false);
   const [force, setForce] = useState(false);
   const [preferGpu, setPreferGpu] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -111,6 +111,10 @@ export default function App() {
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [downloadPct, setDownloadPct] = useState(0);
+  /** Avoid duplicate dialogs when engine emits error then exits. */
+  const sawTerminalRef = useRef(false);
+  /** User pressed Stop — don't treat taskkill exit as a crash dialog. */
+  const userStoppedRef = useRef(false);
 
   const elapsedSec = useElapsed(busy, jobId);
 
@@ -187,16 +191,45 @@ export default function App() {
         setPage("transcript");
       }
       if (ev.type === "error" && ev.fatal) {
+        sawTerminalRef.current = true;
         setErrFriendly(ev.friendly || { title: "Lỗi", body: ev.message || "" });
         setErrTech(JSON.stringify(ev, null, 2));
         setErrOpen(true);
         setBusy(false);
       }
       if (ev.type === "completed" || ev.type === "cancelled") {
+        sawTerminalRef.current = true;
         setBusy(false);
         if (downloading) {
           setDownloading(null);
           setDownloadPct(0);
+        }
+      }
+      if (ev.type === "engine_exited") {
+        const code = typeof ev.code === "number" ? ev.code : Number(ev.code);
+        setBusy(false);
+        if (downloading) {
+          setDownloading(null);
+          setDownloadPct(0);
+        }
+        if (userStoppedRef.current || code === 2) {
+          userStoppedRef.current = false;
+          sawTerminalRef.current = true;
+          setStageLabel("Đã dừng");
+        } else if (
+          !sawTerminalRef.current &&
+          code !== 0 &&
+          code !== 3 &&
+          !Number.isNaN(code)
+        ) {
+          sawTerminalRef.current = true;
+          setStageLabel(`Engine lỗi (code ${code})`);
+          setErrFriendly({
+            title: "Engine dừng bất thường",
+            body: `Tiến trình xử lý kết thúc với mã ${code}. Thử Bắt đầu lại. Nếu lỗi lặp lại, chạy scripts/build-engine.ps1 rồi cài lại.`,
+          });
+          setErrTech(String(ev.message || `exit code ${code}`));
+          setErrOpen(true);
         }
       }
     },
@@ -321,6 +354,8 @@ export default function App() {
       return;
     }
     setBusy(true);
+    sawTerminalRef.current = false;
+    userStoppedRef.current = false;
     setLogs([]);
     setFileProgress({
       current: 0,
@@ -361,12 +396,21 @@ export default function App() {
   }
 
   async function onStop() {
-    if (!jobId) return;
+    userStoppedRef.current = true;
+    if (!jobId) {
+      setBusy(false);
+      setStageLabel("Đã dừng");
+      return;
+    }
     try {
       await cancelJob(jobId);
       setStageLabel("Đã gửi lệnh dừng");
+      setBusy(false);
     } catch (e) {
       pushLog({ text: String(e), cls: "error" });
+      // Unblock UI even if cancel CLI/engine fails
+      setBusy(false);
+      setStageLabel("Đã dừng (ép)");
     }
   }
 

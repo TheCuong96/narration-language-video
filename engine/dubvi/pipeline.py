@@ -492,9 +492,19 @@ def run_job(cfg: JobConfig) -> int:
 
         if failed:
             update_job_state(jid, status="failed", failed=failed)
+            q = queue.load_queue(jid) or {}
+            details: list[str] = []
+            for name in failed:
+                stem = Path(name).stem
+                item = next(
+                    (it for it in (q.get("items") or []) if it.get("stem") == stem),
+                    None,
+                )
+                err = (item or {}).get("error") if item else None
+                details.append(f"{name}: {err}" if err else name)
             events.error(
                 ErrorCode.INTERNAL,
-                f"Hoàn tất với {len(failed)} lỗi: {', '.join(failed)}",
+                f"Hoàn tất với {len(failed)} lỗi: {'; '.join(details)}",
                 fatal=True,
             )
             return 1

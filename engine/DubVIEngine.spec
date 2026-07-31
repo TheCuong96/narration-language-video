@@ -43,7 +43,9 @@ except Exception:
     pass
 
 a = Analysis(
-    ["dubvi/__main__.py"],
+    # Top-level entry with absolute imports — do NOT use dubvi/__main__.py
+    # (relative imports break when PyInstaller runs it as a bare script).
+    ["run_engine.py"],
     pathex=["."],
     binaries=binaries,
     datas=datas,

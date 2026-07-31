@@ -34,9 +34,30 @@ fn repo_engine_dir() -> PathBuf {
         .join("engine")
 }
 
+fn is_cargo_target_exe() -> bool {
+    std::env::current_exe()
+        .ok()
+        .map(|p| {
+            let s = p.to_string_lossy();
+            // tauri/cargo local runs; installed apps live under Program Files / AppData.
+            s.contains("target\\debug")
+                || s.contains("target/debug")
+                || s.contains("target\\release")
+                || s.contains("target/release")
+        })
+        .unwrap_or(false)
+}
+
 pub fn engine_command() -> (PathBuf, Vec<String>) {
     if let Ok(p) = std::env::var("DUBVI_ENGINE") {
         return (PathBuf::from(p), vec![]);
+    }
+    // During `tauri dev` / cargo runs, prefer live Python so engine source edits apply
+    // without rebuilding the stale PyInstaller sidecar next to dubvi.exe.
+    let engine_pkg = repo_engine_dir().join("dubvi").join("__init__.py");
+    if is_cargo_target_exe() && engine_pkg.is_file() {
+        let py = which_python();
+        return (py, vec!["-u".into(), "-m".into(), "dubvi".into()]);
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -67,6 +88,7 @@ fn spawn_env() -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = std::env::vars().collect();
     env.push(("PYTHONUNBUFFERED".into(), "1".into()));
     env.push(("PYTHONUTF8".into(), "1".into()));
+    env.push(("PYTHONIOENCODING".into(), "utf-8".into()));
     let engine = repo_engine_dir();
     if engine.is_dir() {
         let existing = std::env::var("PYTHONPATH").unwrap_or_default();
@@ -129,7 +151,7 @@ fn spawn_streaming(
     let mut child = cmd.spawn().map_err(|e| format!("Không chạy engine: {e}"))?;
     {
         let mut st = state.lock().map_err(|e| e.to_string())?;
-        st.current_job_id = Some(job_id);
+        st.current_job_id = Some(job_id.clone());
         st.child_pid = Some(child.id());
     }
 
@@ -153,15 +175,29 @@ fn spawn_streaming(
 
     let state2 = Arc::clone(&state);
     let app_done = app;
+    let job_for_exit = job_id.clone();
     thread::spawn(move || {
         let status = child.wait();
         if let Ok(mut st) = state2.lock() {
             st.child_pid = None;
+            if st.current_job_id.as_deref() == Some(job_for_exit.as_str()) {
+                st.current_job_id = None;
+            }
         }
         let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
         let _ = app_done.emit(
             "engine-event",
             serde_json::json!({"type":"log","message": format!("Engine kết thúc (code {code})")}),
+        );
+        // Always notify UI so busy state clears even if engine crashed before JSONL events.
+        let _ = app_done.emit(
+            "engine-event",
+            serde_json::json!({
+                "type": "engine_exited",
+                "code": code,
+                "job_id": job_for_exit,
+                "message": format!("Engine kết thúc (code {code})")
+            }),
         );
     });
     Ok(())
@@ -234,18 +270,69 @@ pub async fn start_job(
     Ok(job_id)
 }
 
+fn write_cancel_flag(job_id: &str) -> Result<(), String> {
+    let base = if cfg!(windows) {
+        std::env::var("LOCALAPPDATA").unwrap_or_else(|_| {
+            format!(
+                "{}\\AppData\\Local",
+                std::env::var("USERPROFILE").unwrap_or_default()
+            )
+        })
+    } else {
+        format!(
+            "{}/.local/share",
+            std::env::var("HOME").unwrap_or_else(|_| ".".into())
+        )
+    };
+    let dir = PathBuf::from(base).join("DubVI").join("jobs").join(job_id);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("cancel.flag"), "1").map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn kill_pid(pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
 pub async fn cancel_job(state: State<'_, Mutex<EngineState>>, job_id: String) -> Result<(), String> {
-    let _ = run_engine_capture(&["cancel", &job_id])?;
-    if let Ok(st) = state.lock() {
-        if let Some(pid) = st.child_pid {
-            #[cfg(windows)]
-            {
-                let _ = Command::new("taskkill")
-                    .args(["/PID", &pid.to_string(), "/T", "/F"])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
+    // Soft-fail: engine CLI may be broken; still write flag + kill process.
+    let _ = run_engine_capture(&["cancel", &job_id]);
+    let _ = write_cancel_flag(&job_id);
+
+    let pid = state.lock().ok().and_then(|st| st.child_pid);
+    if let Some(pid) = pid {
+        kill_pid(pid);
+    }
+    // Also kill via shared Arc used by streaming threads
+    if let Ok(shared) = state_arc(&state) {
+        if let Ok(mut st) = shared.lock() {
+            if let Some(pid) = st.child_pid.take() {
+                kill_pid(pid);
             }
+            if st.current_job_id.as_deref() == Some(job_id.as_str()) {
+                st.current_job_id = None;
+            }
+        }
+    }
+    if let Ok(mut st) = state.lock() {
+        st.child_pid = None;
+        if st.current_job_id.as_deref() == Some(job_id.as_str()) {
+            st.current_job_id = None;
         }
     }
     Ok(())
