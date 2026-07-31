@@ -23,6 +23,17 @@ export interface QueueItem {
   size_label?: string;
   duration_sec?: number;
   size_bytes?: number;
+  /** True when this file was fetched via yt-dlp URL download. */
+  from_url?: boolean;
+}
+
+export interface UrlDownloadNotice {
+  path: string;
+  folder: string;
+  fileName: string;
+  sourceUrl: string;
+  duration_label?: string;
+  size_label?: string;
 }
 
 export interface QueueState {
@@ -113,6 +124,8 @@ export interface AppSettings {
   whisper_model: string;
   device_mode: DeviceMode;
   default_output_dir: string;
+  /** Folder where yt-dlp saves remote videos before dubbing. */
+  default_download_dir: string;
   cleanup_temps: boolean;
   mix_original_db: number;
   voice: string;

@@ -37,6 +37,17 @@ async fn pick_output_dir(app: AppHandle) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+async fn pick_download_dir(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let dir = app
+        .dialog()
+        .file()
+        .set_title("Chọn thư mục tải video về")
+        .blocking_pick_folder();
+    Ok(dir.and_then(|d| d.into_path().ok().map(|p| p.to_string_lossy().to_string())))
+}
+
+#[tauri::command]
 async fn pick_speaker_wav(app: AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let file = app
@@ -67,6 +78,26 @@ async fn probe_videos(paths: Vec<String>) -> Result<Value, String> {
     args.extend(paths);
     let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     engine::run_engine_json(&str_args).await
+}
+
+#[tauri::command]
+async fn probe_url(url: String) -> Result<Value, String> {
+    engine::run_engine_json(&["probe-url", &url]).await
+}
+
+#[tauri::command]
+async fn download_url(
+    app: AppHandle,
+    state: State<'_, Mutex<EngineState>>,
+    url: String,
+    download_dir: Option<String>,
+) -> Result<String, String> {
+    engine::download_url(app, state, url, download_dir).await
+}
+
+#[tauri::command]
+async fn url_help() -> Result<Value, String> {
+    engine::run_engine_json(&["url-help"]).await
 }
 
 #[tauri::command]
@@ -174,9 +205,13 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             pick_videos,
             pick_output_dir,
+            pick_download_dir,
             pick_speaker_wav,
             open_folder,
             probe_videos,
+            probe_url,
+            download_url,
+            url_help,
             start_job,
             cancel_job,
             retry_failed,

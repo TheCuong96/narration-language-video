@@ -1,5 +1,11 @@
-import { useMemo, type DragEvent, type MouseEvent } from "react";
-import type { AudioMode, QueueItem, XttsSpeakerOption } from "../lib/types";
+import { useMemo, useState, type DragEvent, type MouseEvent } from "react";
+import type {
+  AudioMode,
+  QueueItem,
+  UrlDownloadNotice,
+  XttsSpeakerOption,
+} from "../lib/types";
+import type { UrlHelpInfo } from "../lib/engine";
 import { formatElapsed, useElapsed } from "../hooks/useElapsed";
 import { computeProgressEta } from "../lib/progressEta";
 
@@ -76,12 +82,23 @@ interface Props {
   elapsedSec: number;
   completedElapsedSec: number[];
   dragOver: boolean;
+  urlInput: string;
+  downloadDir: string;
+  urlHelp: UrlHelpInfo | null;
+  downloadingUrl: boolean;
+  lastUrlDownload: UrlDownloadNotice | null;
   onDragOver: (e: DragEvent) => void;
   onDragLeave: () => void;
   onDrop: (e: DragEvent) => void;
   onPickFiles: () => void;
   onPickOut: () => void;
+  onPickDownloadDir: () => void;
   onChangeOutput: (v: string) => void;
+  onChangeDownloadDir: (v: string) => void;
+  onChangeUrl: (v: string) => void;
+  onDownloadUrl: () => void;
+  onOpenDownloadFolder: () => void;
+  onDismissDownloadNotice: () => void;
   onVoice: (v: string) => void;
   onXttsSpeaker: (path: string) => void;
   onModel: (v: string) => void;
@@ -121,12 +138,23 @@ export function ProcessPage(props: Props) {
     elapsedSec,
     completedElapsedSec,
     dragOver,
+    urlInput,
+    downloadDir,
+    urlHelp,
+    downloadingUrl,
+    lastUrlDownload,
     onDragOver,
     onDragLeave,
     onDrop,
     onPickFiles,
     onPickOut,
+    onPickDownloadDir,
     onChangeOutput,
+    onChangeDownloadDir,
+    onChangeUrl,
+    onDownloadUrl,
+    onOpenDownloadFolder,
+    onDismissDownloadNotice,
     onVoice,
     onXttsSpeaker,
     onModel,
@@ -143,6 +171,8 @@ export function ProcessPage(props: Props) {
     onOpenReview,
   } = props;
 
+  const [showUrlHelp, setShowUrlHelp] = useState(false);
+
   const fileLabel = useMemo(() => {
     if (!files.length) return "Chưa chọn video";
     if (files.length === 1) return files[0];
@@ -157,9 +187,10 @@ export function ProcessPage(props: Props) {
   const filePct = Math.max(0, Math.min(100, Math.round(fileProgress.percent || 0)));
   const stageKey = fileProgress.stage || "";
   const fileIndex = overallProgress.fileIndex || 0;
-  const settingsLocked = busy;
+  const settingsLocked = busy || downloadingUrl;
   const hasCompletedResult =
     !busy &&
+    !downloadingUrl &&
     (overallPct >= 100 || queue.some((q) => q.status === "completed"));
 
   const stageElapsedSec = useElapsed(busy && !!stageKey, stageKey);
@@ -211,9 +242,185 @@ export function ProcessPage(props: Props) {
         <span>MP4 · MKV · MOV · AVI · WebM — hoặc bấm chọn một / nhiều file</span>
         <div className="drop-path">{fileLabel}</div>
         {settingsLocked ? (
-          <div className="drop-locked">Đang xử lý — không đổi video / thiết lập</div>
+          <div className="drop-locked">
+            {downloadingUrl
+              ? "Đang tải video từ URL…"
+              : "Đang xử lý — không đổi video / thiết lập"}
+          </div>
         ) : null}
       </div>
+
+      <section className={`panel url-panel ${settingsLocked ? "settings-locked" : ""}`}>
+        <h2>Tải từ liên kết (yt-dlp)</h2>
+        <p className="muted url-lead">
+          Dán URL video công khai → tải về máy → thêm vào hàng đợi thuyết minh tiếng Việt.
+        </p>
+        <div className="row url-row">
+          <label htmlFor="download-dir">Lưu vào</label>
+          <input
+            id="download-dir"
+            value={downloadDir}
+            onChange={(e) => onChangeDownloadDir(e.target.value)}
+            placeholder="Để trống = thư mục tạm của app (AppData\DubVI\downloads)"
+            disabled={settingsLocked}
+          />
+          <button type="button" onClick={onPickDownloadDir} disabled={settingsLocked}>
+            Chọn
+          </button>
+        </div>
+        <div className="row url-row">
+          <label htmlFor="video-url">URL</label>
+          <input
+            id="video-url"
+            value={urlInput}
+            onChange={(e) => onChangeUrl(e.target.value)}
+            placeholder="https://www.youtube.com/watch?v=…"
+            disabled={settingsLocked}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !settingsLocked) {
+                e.preventDefault();
+                onDownloadUrl();
+              }
+            }}
+          />
+          <button
+            type="button"
+            className="primary"
+            disabled={settingsLocked || !urlInput.trim()}
+            onClick={onDownloadUrl}
+          >
+            {downloadingUrl ? "Đang tải…" : "Tải về"}
+          </button>
+        </div>
+        <p className="muted url-dir-hint">
+          {downloadDir.trim()
+            ? `Video sẽ lưu vào: ${downloadDir.trim()}`
+            : "Chưa chọn thư mục — file sẽ vào thư mục tải tạm của Dub VI."}
+        </p>
+        {downloadingUrl ? (
+          <div className="url-status url-status-busy" role="status">
+            <strong>Đang tải về máy…</strong>
+            <span>Theo dõi thanh tiến độ bên dưới. Có thể bấm «Hủy tải».</span>
+          </div>
+        ) : null}
+        {lastUrlDownload && !downloadingUrl ? (
+          <div className="url-status url-status-ok" role="status">
+            <div className="url-status-head">
+              <strong>Đã tải video về máy</strong>
+              <button
+                type="button"
+                className="linkish url-status-dismiss"
+                onClick={onDismissDownloadNotice}
+              >
+                Đóng
+              </button>
+            </div>
+            <dl className="url-status-meta">
+              <div>
+                <dt>Tên file</dt>
+                <dd>{lastUrlDownload.fileName}</dd>
+              </div>
+              <div>
+                <dt>Thư mục</dt>
+                <dd className="path">{lastUrlDownload.folder}</dd>
+              </div>
+              <div>
+                <dt>Đường dẫn đầy đủ</dt>
+                <dd className="path">{lastUrlDownload.path}</dd>
+              </div>
+              {(lastUrlDownload.duration_label || lastUrlDownload.size_label) && (
+                <div>
+                  <dt>Thông tin</dt>
+                  <dd>
+                    {lastUrlDownload.duration_label || "—"}
+                    {" · "}
+                    {lastUrlDownload.size_label || "—"}
+                  </dd>
+                </div>
+              )}
+              <div>
+                <dt>URL nguồn</dt>
+                <dd className="path">{lastUrlDownload.sourceUrl}</dd>
+              </div>
+            </dl>
+            <div className="url-status-actions">
+              <button type="button" className="primary" onClick={onOpenDownloadFolder}>
+                Mở thư mục tải về
+              </button>
+              <span className="muted">
+                Mở Explorer để xem/phát thử file trước khi Bắt đầu thuyết minh.
+              </span>
+            </div>
+          </div>
+        ) : null}
+        <button
+          type="button"
+          className="linkish"
+          onClick={() => setShowUrlHelp((v) => !v)}
+          aria-expanded={showUrlHelp}
+        >
+          {showUrlHelp ? "Ẩn hướng dẫn video nào tải được" : "Video nào có thể tải về?"}
+        </button>
+        {showUrlHelp && (
+          <div className="url-help">
+            <p>{urlHelp?.summary || "Dùng yt-dlp để tải một video công khai từ http(s)."}</p>
+            <div className="url-help-cols">
+              <div>
+                <h3>Thường tải được</h3>
+                <ul>
+                  {(
+                    urlHelp?.typically_works || [
+                      "YouTube — video công khai",
+                      "Vimeo, Dailymotion và nhiều site trong yt-dlp",
+                      "Link file media trực tiếp (mp4/webm) nếu server cho phép",
+                    ]
+                  ).map((t) => (
+                    <li key={t}>{t}</li>
+                  ))}
+                </ul>
+              </div>
+              <div>
+                <h3>Thường không tải được</h3>
+                <ul>
+                  {(
+                    urlHelp?.often_fails_or_unsupported || [
+                      "Video riêng tư / trả phí / cần đăng nhập",
+                      "DRM (Netflix, Disney+…)",
+                      "Livestream đang phát; playlist cả kênh",
+                    ]
+                  ).map((t) => (
+                    <li key={t}>{t}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+            {urlHelp?.tips?.length ? (
+              <>
+                <h3>Mẹo</h3>
+                <ul>
+                  {urlHelp.tips.map((t) => (
+                    <li key={t}>{t}</li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
+            <p className="url-help-foot">
+              Danh sách site đầy đủ của yt-dlp:{" "}
+              <a
+                href={
+                  urlHelp?.supported_sites_url ||
+                  "https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md"
+                }
+                target="_blank"
+                rel="noreferrer"
+              >
+                supportedsites.md
+              </a>
+              {urlHelp?.yt_dlp_version ? ` · yt-dlp ${urlHelp.yt_dlp_version}` : ""}
+            </p>
+          </div>
+        )}
+      </section>
 
       <div className="grid">
         <section className={`panel ${settingsLocked ? "settings-locked" : ""}`}>
@@ -351,21 +558,31 @@ export function ProcessPage(props: Props) {
             </label>
           </div>
           <div className="actions">
-            <button type="button" className="primary" disabled={busy} onClick={onStart}>
+            <button
+              type="button"
+              className="primary"
+              disabled={busy || downloadingUrl}
+              onClick={onStart}
+            >
               Bắt đầu
             </button>
-            <button type="button" className="danger" disabled={!busy} onClick={onStop}>
-              Tạm dừng
+            <button
+              type="button"
+              className="danger"
+              disabled={!busy && !downloadingUrl}
+              onClick={onStop}
+            >
+              {downloadingUrl ? "Hủy tải" : "Tạm dừng"}
             </button>
             <button
               type="button"
               className="primary"
-              disabled={busy || !canResume}
+              disabled={busy || downloadingUrl || !canResume}
               onClick={onResume}
             >
               Tiếp tục
             </button>
-            <button type="button" disabled={busy} onClick={onRetry}>
+            <button type="button" disabled={busy || downloadingUrl} onClick={onRetry}>
               Thử lại lỗi
             </button>
             <button
@@ -373,7 +590,7 @@ export function ProcessPage(props: Props) {
               className={
                 hasCompletedResult ? "btn-open-result is-ready" : "btn-open-result"
               }
-              disabled={!outputDir || busy}
+              disabled={!outputDir || busy || downloadingUrl}
               onClick={onOpenOut}
             >
               Mở kết quả
@@ -504,12 +721,27 @@ export function ProcessPage(props: Props) {
         <ul className="queue">
           {queue.length === 0 && <li className="empty">Chưa có video</li>}
           {queue.map((item) => (
-            <li key={`${item.stem}-${item.index}`}>
+            <li
+              key={`${item.stem}-${item.index}`}
+              className={item.from_url ? "from-url" : undefined}
+            >
               <div>
-                <div className="q-title">{item.stem}</div>
+                <div className="q-title">
+                  {item.stem}
+                  {item.from_url ? (
+                    <span className="badge-url" title="Đã tải từ URL về máy">
+                      Đã tải từ URL
+                    </span>
+                  ) : null}
+                </div>
                 <div className="q-meta">
                   {item.duration_label || "—"} · {item.size_label || "—"}
                 </div>
+                {item.from_url && item.input ? (
+                  <div className="q-path" title={item.input}>
+                    {item.input}
+                  </div>
+                ) : null}
                 {item.error && <div className="q-err">{item.error}</div>}
                 {item.status === "review" && (
                   <button type="button" onClick={() => onOpenReview(item.stem)}>

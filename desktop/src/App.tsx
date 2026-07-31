@@ -6,12 +6,14 @@ import {
   deleteModel,
   doctor as runDoctor,
   downloadModel,
+  downloadUrl,
   filterVideoFiles,
   getQueue,
   getSettings,
   listModels,
   listXttsSpeakers,
   openFolder,
+  pickDownloadDir,
   pickOutputDir,
   pickSpeakerWav,
   pickVideos,
@@ -22,6 +24,8 @@ import {
   reviewSet,
   saveSettings,
   startJob,
+  urlHelp as fetchUrlHelp,
+  type UrlHelpInfo,
 } from "./lib/engine";
 import type {
   AppSettings,
@@ -32,9 +36,20 @@ import type {
   Page,
   QueueItem,
   SegmentRow,
+  UrlDownloadNotice,
   WhisperModelInfo,
   XttsSpeakerOption,
 } from "./lib/types";
+
+function parentDir(path: string): string {
+  const i = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
+  return i >= 0 ? path.slice(0, i) : path;
+}
+
+function baseName(path: string): string {
+  const i = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
+  return i >= 0 ? path.slice(i + 1) : path;
+}
 import { useElapsed } from "./hooks/useElapsed";
 import { ProcessPage } from "./pages/ProcessPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -44,6 +59,7 @@ const defaultSettings: AppSettings = {
   whisper_model: "small",
   device_mode: "cpu",
   default_output_dir: "",
+  default_download_dir: "",
   cleanup_temps: true,
   mix_original_db: -18,
   voice: "vi-VN-HoaiMyNeural",
@@ -121,6 +137,15 @@ export default function App() {
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [downloadPct, setDownloadPct] = useState(0);
+  const [urlInput, setUrlInput] = useState("");
+  const [downloadDir, setDownloadDir] = useState("");
+  const [urlHelp, setUrlHelp] = useState<UrlHelpInfo | null>(null);
+  const [downloadingUrl, setDownloadingUrl] = useState(false);
+  const [lastUrlDownload, setLastUrlDownload] = useState<UrlDownloadNotice | null>(
+    null,
+  );
+  const urlJobIdRef = useRef<string | null>(null);
+  const urlDownloadedPathsRef = useRef<Set<string>>(new Set());
 
   const refreshXttsSpeakers = useCallback(async () => {
     try {
@@ -156,13 +181,20 @@ export default function App() {
       if (ev.type === "queue_updated" && ev.queue?.items) {
         setQueue((prev) => {
           const meta = new Map(prev.map((p) => [p.stem, p]));
-          return ev.queue!.items.map((it) => ({
-            ...it,
-            duration_label: meta.get(it.stem)?.duration_label,
-            size_label: meta.get(it.stem)?.size_label,
-            duration_sec: meta.get(it.stem)?.duration_sec,
-            size_bytes: meta.get(it.stem)?.size_bytes,
-          }));
+          return ev.queue!.items.map((it) => {
+            const prevItem = meta.get(it.stem);
+            const fromUrl =
+              Boolean(prevItem?.from_url) ||
+              urlDownloadedPathsRef.current.has(it.input);
+            return {
+              ...it,
+              duration_label: prevItem?.duration_label,
+              size_label: prevItem?.size_label,
+              duration_sec: prevItem?.duration_sec,
+              size_bytes: prevItem?.size_bytes,
+              from_url: fromUrl || prevItem?.from_url,
+            };
+          });
         });
       }
       if (ev.type === "stage") {
@@ -173,6 +205,30 @@ export default function App() {
           setDownloadPct(
             typeof ev.percent === "number" ? ev.percent : ev.current || 0,
           );
+        } else if (ev.stage === "downloading_video") {
+          const stagePct =
+            typeof ev.percent === "number"
+              ? ev.percent
+              : ev.total
+                ? Math.round((100 * (ev.current || 0)) / ev.total)
+                : 0;
+          setFileProgress({
+            current: ev.current || 0,
+            total: ev.total || 100,
+            percent: stagePct,
+            message: ev.message || "Đang tải video…",
+            stageLabel: (ev.stage_label as string) || "Tải video",
+            stage: ev.stage || "downloading_video",
+          });
+          setOverallProgress({
+            percent: stagePct,
+            fileIndex: 1,
+            fileTotal: 1,
+            fileName: "",
+          });
+          if (ev.message || ev.stage_label) {
+            setStageLabel(String(ev.message || ev.stage_label || "Đang tải video…"));
+          }
         } else {
           const stagePct =
             typeof ev.percent === "number"
@@ -286,7 +342,7 @@ export default function App() {
     (async () => {
       try {
         const s = await getSettings();
-        setSettings(s);
+        setSettings({ ...defaultSettings, ...s });
         setModel(s.whisper_model);
         setVoice(s.voice);
         setAudioMode(s.audio_mode);
@@ -294,6 +350,7 @@ export default function App() {
         setReview(s.review_by_default);
         setPreferGpu(s.device_mode === "auto");
         if (s.default_output_dir) setOutputDir(s.default_output_dir);
+        if (s.default_download_dir) setDownloadDir(s.default_download_dir);
       } catch {
         /* browser preview */
       }
@@ -306,6 +363,11 @@ export default function App() {
         setXttsSpeakers(await listXttsSpeakers());
       } catch {
         /* ignore */
+      }
+      try {
+        setUrlHelp(await fetchUrlHelp());
+      } catch {
+        /* browser preview / engine missing */
       }
     })();
   }, []);
@@ -334,9 +396,12 @@ export default function App() {
     return () => un?.();
   }, []);
 
-  async function addFiles(paths: string[]) {
+  async function addFiles(paths: string[], opts?: { fromUrl?: boolean }) {
     const merged = Array.from(new Set([...files, ...paths]));
     setFiles(merged);
+    if (opts?.fromUrl) {
+      for (const p of paths) urlDownloadedPathsRef.current.add(p);
+    }
     try {
       const probed = await probeVideos(merged);
       setQueue(
@@ -350,8 +415,10 @@ export default function App() {
           size_label: p.size_label,
           duration_sec: p.duration_sec,
           size_bytes: p.size_bytes,
+          from_url: urlDownloadedPathsRef.current.has(p.path),
         })),
       );
+      return probed;
     } catch {
       setQueue(
         merged.map((f, i) => ({
@@ -360,13 +427,15 @@ export default function App() {
           output: "",
           stem: f.replace(/^.*[\\/]/, "").replace(/\.[^.]+$/, ""),
           status: "pending",
+          from_url: urlDownloadedPathsRef.current.has(f),
         })),
       );
+      return null;
     }
   }
 
   async function onPickFiles() {
-    if (busy) return;
+    if (busy || downloadingUrl) return;
     try {
       const picked = await pickVideos();
       if (picked?.length) await addFiles(picked);
@@ -375,8 +444,82 @@ export default function App() {
     }
   }
 
+  async function onDownloadUrl() {
+    const url = urlInput.trim();
+    if (!url || busy || downloadingUrl) return;
+    setDownloadingUrl(true);
+    sawTerminalRef.current = false;
+    userStoppedRef.current = false;
+    setCanResume(false);
+    setStageLabel("Đang tải video từ URL…");
+    setFileProgress({
+      current: 0,
+      total: 100,
+      percent: 0,
+      message: "Đang khởi động yt-dlp…",
+      stageLabel: "Tải video",
+      stage: "downloading_video",
+    });
+    setOverallProgress({
+      percent: 0,
+      fileIndex: 1,
+      fileTotal: 1,
+      fileName: "",
+    });
+    pushLog({ text: `Tải URL: ${url}` });
+    try {
+      const path = await downloadUrl(
+        url,
+        onEngineEvent,
+        (id) => {
+          urlJobIdRef.current = id;
+        },
+        downloadDir.trim() || null,
+      );
+      pushLog({ text: `Đã tải: ${path}` });
+      const sourceUrl = url;
+      setUrlInput("");
+      const probed = await addFiles([path], { fromUrl: true });
+      const info = probed?.find((p) => p.path === path);
+      setLastUrlDownload({
+        path,
+        folder: parentDir(path),
+        fileName: baseName(path),
+        sourceUrl,
+        duration_label: info?.duration_label,
+        size_label: info?.size_label,
+      });
+      setStageLabel("Đã tải video về máy — kiểm tra thư mục rồi Bắt đầu");
+      setFileProgress((p) => ({
+        ...p,
+        percent: 100,
+        message: `Đã lưu: ${baseName(path)}`,
+        stageLabel: "Tải video",
+      }));
+      setOverallProgress((p) => ({ ...p, percent: 100 }));
+    } catch (e) {
+      const msg = String(e);
+      if (!userStoppedRef.current) {
+        setErrFriendly({
+          title: "Không tải được video",
+          body: msg,
+        });
+        setErrTech(msg);
+        setErrOpen(true);
+        setStageLabel("Tải URL thất bại");
+      } else {
+        setStageLabel("Đã hủy tải URL");
+      }
+      pushLog({ text: msg, cls: "error" });
+    } finally {
+      setDownloadingUrl(false);
+      urlJobIdRef.current = null;
+      userStoppedRef.current = false;
+    }
+  }
+
   async function onPickOut() {
-    if (busy) return;
+    if (busy || downloadingUrl) return;
     try {
       const dir = await pickOutputDir();
       if (dir) setOutputDir(dir);
@@ -385,10 +528,20 @@ export default function App() {
     }
   }
 
+  async function onPickDownloadDir() {
+    if (busy || downloadingUrl) return;
+    try {
+      const dir = await pickDownloadDir();
+      if (dir) setDownloadDir(dir);
+    } catch (e) {
+      pushLog({ text: String(e), cls: "warn" });
+    }
+  }
+
   function onBrowserDrop(e: DragEvent) {
     e.preventDefault();
     setDragOver(false);
-    if (busy) return;
+    if (busy || downloadingUrl) return;
     const list = filterVideoFiles(e.dataTransfer.files);
     if (!list.length) return;
     pushLog({
@@ -457,6 +610,17 @@ export default function App() {
 
   async function onStop() {
     userStoppedRef.current = true;
+    if (downloadingUrl) {
+      const id = urlJobIdRef.current || jobId;
+      try {
+        if (id) await cancelJob(id);
+      } catch (e) {
+        pushLog({ text: String(e), cls: "warn" });
+      }
+      setDownloadingUrl(false);
+      setStageLabel("Đã hủy tải URL");
+      return;
+    }
     if (!jobId) {
       setBusy(false);
       setStageLabel("Đã tạm dừng");
@@ -478,13 +642,19 @@ export default function App() {
         if (q?.items?.length) {
           setQueue((prev) => {
             const meta = new Map(prev.map((p) => [p.stem, p]));
-            return q.items.map((it) => ({
-              ...it,
-              duration_label: meta.get(it.stem)?.duration_label,
-              size_label: meta.get(it.stem)?.size_label,
-              duration_sec: meta.get(it.stem)?.duration_sec,
-              size_bytes: meta.get(it.stem)?.size_bytes,
-            }));
+            return q.items.map((it) => {
+              const prevItem = meta.get(it.stem);
+              return {
+                ...it,
+                duration_label: prevItem?.duration_label,
+                size_label: prevItem?.size_label,
+                duration_sec: prevItem?.duration_sec,
+                size_bytes: prevItem?.size_bytes,
+                from_url:
+                  Boolean(prevItem?.from_url) ||
+                  urlDownloadedPathsRef.current.has(it.input),
+              };
+            });
           });
           const resumable = q.items.some((it) =>
             ["pending", "failed", "cancelled", "running"].includes(it.status),
@@ -617,6 +787,11 @@ export default function App() {
           elapsedSec={elapsedSec}
           completedElapsedSec={completedElapsedSec}
           dragOver={dragOver}
+          urlInput={urlInput}
+          downloadDir={downloadDir}
+          urlHelp={urlHelp}
+          downloadingUrl={downloadingUrl}
+          lastUrlDownload={lastUrlDownload}
           onDragOver={(e) => {
             e.preventDefault();
             setDragOver(true);
@@ -625,7 +800,15 @@ export default function App() {
           onDrop={onBrowserDrop}
           onPickFiles={onPickFiles}
           onPickOut={onPickOut}
+          onPickDownloadDir={() => void onPickDownloadDir()}
           onChangeOutput={setOutputDir}
+          onChangeDownloadDir={setDownloadDir}
+          onChangeUrl={setUrlInput}
+          onDownloadUrl={() => void onDownloadUrl()}
+          onOpenDownloadFolder={() => {
+            if (lastUrlDownload?.folder) void openFolder(lastUrlDownload.folder);
+          }}
+          onDismissDownloadNotice={() => setLastUrlDownload(null)}
           onVoice={setVoice}
           onXttsSpeaker={(path) =>
             setSettings((s) => ({ ...s, xtts_speaker_wav: path }))
@@ -675,6 +858,9 @@ export default function App() {
               setReview(settings.review_by_default);
               setPreferGpu(settings.device_mode === "auto");
               if (settings.default_output_dir) setOutputDir(settings.default_output_dir);
+              if (settings.default_download_dir !== undefined) {
+                setDownloadDir(settings.default_download_dir || "");
+              }
               pushLog({ text: "Đã lưu cài đặt" });
             } catch (e) {
               pushLog({ text: String(e), cls: "error" });

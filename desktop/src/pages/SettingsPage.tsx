@@ -257,6 +257,16 @@ export function SettingsPage({
           />
         </div>
         <div className="row">
+          <label>Thư mục tải URL</label>
+          <input
+            value={settings.default_download_dir || ""}
+            onChange={(e) =>
+              onChange({ ...settings, default_download_dir: e.target.value })
+            }
+            placeholder="Để trống = AppData\\DubVI\\downloads"
+          />
+        </div>
+        <div className="row">
           <label>Mức audio gốc (mix)</label>
           <input
             type="number"

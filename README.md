@@ -9,7 +9,7 @@ Whisper + FFmpeg chạy **trên máy bạn**. Mặc định dịch (`deep-transl
 1. Cài `release/DubVI_0.1.0_x64-setup.exe`
 2. Mở **Dub VI** từ Start Menu
 3. Settings → tải model Whisper (đề xuất **small** trên CPU)
-4. Kéo thả video → chọn thư mục ra → Bắt đầu
+4. Kéo thả video **hoặc dán URL** (yt-dlp tải về máy) → chọn thư mục ra → Bắt đầu
 5. (Tuỳ chọn) Sửa bản dịch → tiếp tục tạo giọng
 
 ## Nhà phát triển
