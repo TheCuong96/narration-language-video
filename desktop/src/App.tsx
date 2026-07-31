@@ -48,6 +48,7 @@ const defaultSettings: AppSettings = {
   review_by_default: false,
   translate_provider: "deep-translator",
   tts_provider: "edge-tts",
+  xtts_speaker_wav: "",
 };
 
 function friendlyLine(ev: EngineEvent): { text: string; cls?: string } {
@@ -411,6 +412,9 @@ export default function App() {
           review,
           force,
           preferGpu,
+          translateProvider: settings.translate_provider || "deep-translator",
+          ttsProvider: settings.tts_provider || "edge-tts",
+          xttsSpeakerWav: settings.xtts_speaker_wav || "",
         },
         onEngineEvent,
       );

@@ -1,0 +1,16 @@
+# Optional local NLLB + XTTS-v2 stack (heavy: torch, transformers, Coqui TTS).
+# Install after requirements-base.txt:
+#   pip install -r requirements-base.txt
+#   pip install -r requirements-offline.txt
+#
+# NVIDIA GPU (recommended for XTTS): install a matching torch CUDA wheel first,
+# then the rest of this file.
+
+torch>=2.1.0
+transformers>=4.38.0
+sentencepiece>=0.1.99
+protobuf>=4.25.0
+huggingface_hub>=0.20.0
+TTS>=0.22.0
+soundfile>=0.12.1
+numpy>=1.24.0

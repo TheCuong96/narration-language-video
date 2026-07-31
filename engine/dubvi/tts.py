@@ -1,4 +1,4 @@
-"""edge-tts Vietnamese voice with exponential backoff."""
+"""TTS Vietnamese voice with exponential backoff (edge-tts or local XTTS)."""
 
 from __future__ import annotations
 
@@ -15,10 +15,14 @@ log = get_logger("dubvi.tts")
 MIN_MP3_BYTES = 500
 
 
-async def _tts_once(text: str, out_mp3: Path, voice: str, rate: str) -> None:
-    from .providers import get_tts_provider
-
-    provider = get_tts_provider("edge-tts")
+async def _tts_once(
+    text: str,
+    out_mp3: Path,
+    voice: str,
+    rate: str,
+    *,
+    provider,
+) -> None:
     await provider.synthesize(text, out_mp3, voice=voice, rate=rate)
 
 
@@ -27,24 +31,28 @@ async def tts_segment_with_backoff(
     out_mp3: Path,
     *,
     voice: str,
+    provider,
     max_attempts: int = 5,
     base_delay: float = 1.5,
 ) -> None:
     out_mp3.parent.mkdir(parents=True, exist_ok=True)
     rates = ["+0%", "-5%", "+5%", "+0%", "-10%"]
     last_err: Exception | None = None
+    attempts = max_attempts if getattr(provider, "requires_internet", True) else min(2, max_attempts)
 
-    for attempt in range(max_attempts):
+    for attempt in range(attempts):
         rate = rates[attempt % len(rates)]
         try:
             if out_mp3.exists():
                 out_mp3.unlink()
-            await _tts_once(text, out_mp3, voice, rate)
+            await _tts_once(text, out_mp3, voice, rate, provider=provider)
             if out_mp3.exists() and out_mp3.stat().st_size >= MIN_MP3_BYTES:
                 return
             if out_mp3.exists():
                 out_mp3.unlink()
             last_err = RuntimeError("TTS file too small")
+        except EngineError:
+            raise
         except Exception as e:
             last_err = e
             log.warning("TTS attempt %s: %s", attempt + 1, e)
@@ -53,12 +61,12 @@ async def tts_segment_with_backoff(
                     out_mp3.unlink()
                 except OSError:
                     pass
-        delay = base_delay * (2**attempt)
+        delay = base_delay * (2**attempt) if getattr(provider, "requires_internet", True) else 0.5
         await asyncio.sleep(delay)
 
     raise EngineError(
         ErrorCode.TTS_FAILED,
-        f"Không thể tạo giọng đọc sau {max_attempts} lần: {last_err}",
+        f"Không thể tạo giọng đọc sau {attempts} lần: {last_err}",
     )
 
 
@@ -69,13 +77,27 @@ async def synthesize_all(
     voice: str,
     cancel: CancellationToken | None = None,
     tracker=None,
+    provider_name: str = "edge-tts",
+    prefer_gpu: bool = False,
+    speaker_wav: str = "",
+    language: str = "vi",
 ) -> dict[int, Path]:
     """Generate MP3 per segment; skip existing valid files (resume)."""
+    from .providers import get_tts_provider
+
+    provider = get_tts_provider(
+        provider_name,
+        prefer_gpu=prefer_gpu,
+        speaker_wav=speaker_wav or None,
+        language=language,
+    )
     seg_dir.mkdir(parents=True, exist_ok=True)
+    label = f"Đang tạo giọng đọc ({len(segments)} đoạn) [{provider.name}]"
     if tracker:
-        tracker.begin_stage(Stage.TTS, f"Đang tạo giọng đọc ({len(segments)} đoạn)")
+        tracker.begin_stage(Stage.TTS, label)
     else:
-        events.stage(Stage.TTS, f"Đang tạo giọng đọc ({len(segments)} đoạn)")
+        events.stage(Stage.TTS, label)
+    events.log(provider.privacy_note())
     paths: dict[int, Path] = {}
     total = max(len(segments), 1)
     failures = 0
@@ -93,7 +115,9 @@ async def synthesize_all(
             paths[s.id] = mp3
         else:
             try:
-                await tts_segment_with_backoff(text, mp3, voice=voice)
+                await tts_segment_with_backoff(
+                    text, mp3, voice=voice, provider=provider
+                )
                 paths[s.id] = mp3
             except EngineError as e:
                 failures += 1

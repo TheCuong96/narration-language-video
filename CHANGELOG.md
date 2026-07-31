@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.1 — 2026-07-31
+
+### Added
+
+- Offline translate provider: **NLLB-200 distilled 600M** (`--translate-provider nllb`)
+- Offline TTS provider: **XTTS-v2 / viXTTS** (`--tts-provider xtts-v2`)
+- Settings UI chọn provider + tải model NLLB/XTTS
+- `engine/requirements-offline.txt` (torch, transformers, Coqui TTS)
+- Doctor kiểm tra deps/model khi bật offline
+
+### Notes
+
+- XTTS khuyến nghị GPU; license Coqui CPML (không thương mại)
+- Provider selection được lưu job options để resume/retry/continue
+
 ## 0.1.0 — 2026-07-31
 
 ### Added

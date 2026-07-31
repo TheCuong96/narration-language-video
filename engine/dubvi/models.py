@@ -165,6 +165,9 @@ class JobConfig:
     start_from: StartFrom = StartFrom.AUTO
     allow_reencode: bool = True  # if False, fail instead of re-encoding video
     retry_stems: list[str] = field(default_factory=list)  # only these on retry
+    translate_provider: str = "deep-translator"
+    tts_provider: str = "edge-tts"
+    xtts_speaker_wav: str = ""
 
     @property
     def terms(self) -> list[str]:

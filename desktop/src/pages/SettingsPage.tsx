@@ -15,6 +15,96 @@ interface Props {
   onRefreshModels: () => void;
 }
 
+function ModelList({
+  models,
+  downloading,
+  downloadPct,
+  onDownload,
+  onDelete,
+}: {
+  models: WhisperModelInfo[];
+  downloading: string | null;
+  downloadPct: number;
+  onDownload: (id: string) => void;
+  onDelete: (id: string) => void;
+}) {
+  if (!models.length) {
+    return <p className="muted">Không có model trong danh mục.</p>;
+  }
+  return (
+    <>
+      {downloading && models.some((m) => m.id === downloading) && (
+        <div className="download-progress">
+          Đang tải <strong>{downloading}</strong>… {downloadPct}%
+          <div className="bar">
+            <i style={{ width: `${downloadPct}%` }} />
+          </div>
+        </div>
+      )}
+      <ul className="model-list">
+        {models.map((m) => (
+          <li key={m.id}>
+            <div>
+              <strong>
+                {m.label} {m.recommended ? "★" : ""}
+              </strong>
+              <div className="q-meta">
+                ~{m.size_mb} MB · {m.speed} · {m.quality}
+              </div>
+              <div className="q-meta">{m.recommended_for}</div>
+              {m.license_note ? (
+                <div className="q-meta">License: {m.license_note}</div>
+              ) : null}
+              <div className="q-meta">
+                {m.downloaded
+                  ? `Đã tải (${m.local_mb} MB trên đĩa)`
+                  : "Chưa tải"}
+              </div>
+            </div>
+            <div className="actions vertical">
+              {!m.downloaded ? (
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={!!downloading}
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        `Tải model ${m.id} (~${m.size_mb} MB) về máy?`,
+                      )
+                    ) {
+                      onDownload(m.id);
+                    }
+                  }}
+                >
+                  Tải
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="danger"
+                  disabled={!!downloading}
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        `Xóa model ${m.id} khỏi máy? Bạn sẽ phải tải lại khi dùng.`,
+                      )
+                    ) {
+                      onDelete(m.id);
+                    }
+                  }}
+                >
+                  Xóa
+                </button>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
 export function SettingsPage({
   settings,
   models,
@@ -28,9 +118,15 @@ export function SettingsPage({
   onDelete,
   onRefreshModels,
 }: Props) {
+  const whisperModels = models.filter((m) => (m.kind || "whisper") === "whisper");
+  const translateModels = models.filter((m) => m.kind === "translate");
+  const ttsModels = models.filter((m) => m.kind === "tts");
+  const offlineTranslate = settings.translate_provider === "nllb";
+  const offlineTts = settings.tts_provider === "xtts-v2";
+
   return (
     <div className="settings-stack">
-      <PrivacyBanner />
+      <PrivacyBanner settings={settings} />
 
       <section className="panel">
         <h2>Cài đặt chung</h2>
@@ -126,6 +222,62 @@ export function SettingsPage({
       </section>
 
       <section className="panel">
+        <h2>Nhà cung cấp dịch &amp; giọng đọc</h2>
+        <p className="muted">
+          Online (mặc định) không cần model lớn. Offline cần cài{" "}
+          <code>engine/requirements-offline.txt</code> và tải model bên dưới. XTTS nên
+          bật <strong>Auto GPU</strong>. License XTTS: Coqui CPML (không thương mại).
+        </p>
+        <div className="row">
+          <label>Dịch thuật</label>
+          <select
+            value={settings.translate_provider}
+            onChange={(e) =>
+              onChange({ ...settings, translate_provider: e.target.value })
+            }
+          >
+            <option value="deep-translator">Google (deep-translator) — online</option>
+            <option value="nllb">NLLB-200 — offline</option>
+          </select>
+        </div>
+        <div className="row">
+          <label>Giọng đọc (TTS)</label>
+          <select
+            value={settings.tts_provider}
+            onChange={(e) => onChange({ ...settings, tts_provider: e.target.value })}
+          >
+            <option value="edge-tts">Microsoft Edge TTS — online</option>
+            <option value="xtts-v2">XTTS-v2 (viXTTS) — offline</option>
+          </select>
+        </div>
+        {offlineTts && (
+          <div className="row">
+            <label>Speaker WAV (XTTS)</label>
+            <input
+              placeholder="%LOCALAPPDATA%\DubVI\models\xtts-v2\speaker_default.wav"
+              value={settings.xtts_speaker_wav || ""}
+              onChange={(e) =>
+                onChange({ ...settings, xtts_speaker_wav: e.target.value })
+              }
+            />
+          </div>
+        )}
+        {(offlineTranslate || offlineTts) && (
+          <p className="muted">
+            {offlineTranslate ? "Đã chọn NLLB — tải model dịch bên dưới. " : null}
+            {offlineTts
+              ? "Đã chọn XTTS — tải model TTS và (tuỳ chọn) đặt file WAV giọng mẫu ~3–10s."
+              : null}
+          </p>
+        )}
+        <div className="actions">
+          <button type="button" className="primary" onClick={onSave}>
+            Lưu nhà cung cấp
+          </button>
+        </div>
+      </section>
+
+      <section className="panel">
         <h2>Model Whisper (tải khi cần)</h2>
         <p className="muted">
           Model <strong>không</strong> nằm trong bộ cài. Lưu tại{" "}
@@ -137,80 +289,42 @@ export function SettingsPage({
             Làm mới danh sách
           </button>
         </div>
-        {downloading && (
-          <div className="download-progress">
-            Đang tải <strong>{downloading}</strong>… {downloadPct}%
-            <div className="bar">
-              <i style={{ width: `${downloadPct}%` }} />
-            </div>
-          </div>
-        )}
-        <ul className="model-list">
-          {models.map((m) => (
-            <li key={m.id}>
-              <div>
-                <strong>
-                  {m.label} {m.recommended ? "★" : ""}
-                </strong>
-                <div className="q-meta">
-                  ~{m.size_mb} MB · {m.speed} · {m.quality}
-                </div>
-                <div className="q-meta">{m.recommended_for}</div>
-                <div className="q-meta">
-                  {m.downloaded
-                    ? `Đã tải (${m.local_mb} MB trên đĩa)`
-                    : "Chưa tải"}
-                </div>
-              </div>
-              <div className="actions vertical">
-                {!m.downloaded ? (
-                  <button
-                    type="button"
-                    className="primary"
-                    disabled={!!downloading}
-                    onClick={() => {
-                      if (
-                        window.confirm(
-                          `Tải model ${m.id} (~${m.size_mb} MB) về máy?`,
-                        )
-                      ) {
-                        onDownload(m.id);
-                      }
-                    }}
-                  >
-                    Tải
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="danger"
-                    disabled={!!downloading}
-                    onClick={() => {
-                      if (
-                        window.confirm(
-                          `Xóa model ${m.id} khỏi máy? Bạn sẽ phải tải lại khi dùng.`,
-                        )
-                      ) {
-                        onDelete(m.id);
-                      }
-                    }}
-                  >
-                    Xóa
-                  </button>
-                )}
-              </div>
-            </li>
-          ))}
-        </ul>
+        <ModelList
+          models={whisperModels}
+          downloading={downloading}
+          downloadPct={downloadPct}
+          onDownload={onDownload}
+          onDelete={onDelete}
+        />
       </section>
 
       <section className="panel">
-        <h2>Nhà cung cấp (Community)</h2>
+        <h2>Model offline — dịch (NLLB) &amp; TTS (XTTS)</h2>
         <p className="muted">
-          Đang dùng <code>deep-translator</code> + <code>edge-tts</code>. Các provider
-          có API key (Google Cloud, Azure) được chuẩn bị interface nhưng{" "}
-          <strong>chưa triển khai</strong> trong v0.1.
+          ~2–4 GB mỗi model. Cần Internet lúc tải; sau đó chạy local. XTTS nặng — GPU
+          NVIDIA khuyến nghị.
         </p>
+        <div className="actions">
+          <button type="button" onClick={onRefreshModels}>
+            Làm mới danh sách
+          </button>
+        </div>
+        <h3>Dịch NLLB</h3>
+        <ModelList
+          models={translateModels}
+          downloading={downloading}
+          downloadPct={downloadPct}
+          onDownload={onDownload}
+          onDelete={onDelete}
+        />
+        <h3>TTS XTTS-v2</h3>
+        <ModelList
+          models={ttsModels}
+          downloading={downloading}
+          downloadPct={downloadPct}
+          onDownload={onDownload}
+          onDelete={onDelete}
+        />
       </section>
     </div>
   );

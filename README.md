@@ -2,7 +2,7 @@
 
 Ứng dụng desktop Windows để **lồng tiếng Việt** cho video (Community v0.1).
 
-Whisper + FFmpeg chạy **trên máy bạn**. Dịch (`deep-translator`) và `edge-tts` cần **Internet**. Video **không** được upload lên server của Dub VI.
+Whisper + FFmpeg chạy **trên máy bạn**. Mặc định dịch (`deep-translator`) và `edge-tts` cần **Internet**. Có thể chọn offline: **NLLB** + **XTTS-v2** (cài `engine/requirements-offline.txt` + tải model trong Settings). Video **không** được upload lên server của Dub VI.
 
 ## Người dùng cuối
 
@@ -69,10 +69,23 @@ npm run build
 - [CHANGELOG.md](CHANGELOG.md)
 - [docs/completion-report.md](docs/completion-report.md)
 
+### Offline (NLLB + XTTS)
+
+```powershell
+cd engine
+pip install -r requirements-base.txt
+pip install -r requirements-offline.txt
+python -m dubvi models-download nllb-200-distilled-600M
+python -m dubvi models-download xtts-v2
+```
+
+Trong Settings: chọn dịch **NLLB**, TTS **XTTS-v2**, bật Auto GPU nếu có NVIDIA. XTTS dùng license Coqui CPML (không thương mại).
+
 ## Giới hạn v0.1
 
 - Chỉ Windows x64
-- Community providers: deep-translator + edge-tts (cần mạng)
-- Model Whisper tải riêng (không nằm trong installer)
+- Community mặc định: deep-translator + edge-tts (cần mạng)
+- Offline NLLB/XTTS là tuỳ chọn (nặng; không nằm trong installer)
+- Model Whisper / NLLB / XTTS tải riêng
 - GPU NVIDIA là tuỳ chọn (`requirements-gpu-nvidia.txt`), bản mặc định là CPU
 - Icon hiện là placeholder (xem `desktop/src-tauri/icons/TODO-ICON.md`)
