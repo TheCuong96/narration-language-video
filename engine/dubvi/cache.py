@@ -18,7 +18,8 @@ SCRIPT_VI = "script_vi.txt"
 AUDIO_FLAC = "audio.flac"
 NARRATION = "narration.wav"
 SEGMENTS_DIR = "segments"
-FITTED_DIR = "fitted"
+# Soft-tempo aligner output (invalidates older 1.55× "fitted/" cache)
+FITTED_DIR = "fitted_soft"
 
 
 def save_json(path: Path, data: Any) -> None:
