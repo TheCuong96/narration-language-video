@@ -674,6 +674,7 @@ export default function App() {
               pushLog({ text: "Đã lưu cài đặt" });
             } catch (e) {
               pushLog({ text: String(e), cls: "error" });
+              throw e;
             }
           }}
           onDoctor={async () => {

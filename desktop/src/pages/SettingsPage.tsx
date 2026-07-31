@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type {
   AppSettings,
   DoctorReport,
@@ -5,6 +6,9 @@ import type {
   XttsSpeakerOption,
 } from "../lib/types";
 import { PrivacyBanner } from "../components/PrivacyBanner";
+
+type SaveSection = "general" | "providers";
+type SaveFlash = { kind: "ok" | "err"; text: string };
 
 interface Props {
   settings: AppSettings;
@@ -14,13 +18,26 @@ interface Props {
   downloadPct: number;
   xttsSpeakers: XttsSpeakerOption[];
   onChange: (s: AppSettings) => void;
-  onSave: () => void;
+  onSave: () => Promise<void>;
   onDoctor: () => void;
   onDownload: (id: string) => void;
   onDelete: (id: string) => void;
   onRefreshModels: () => void;
   onPickSpeakerWav: () => void;
   onRefreshSpeakers: () => void;
+}
+
+function SaveStatus({ flash }: { flash: SaveFlash | null }) {
+  if (!flash) return null;
+  return (
+    <div
+      className={`save-flash ${flash.kind === "ok" ? "ok" : "err"}`}
+      role="status"
+      aria-live="polite"
+    >
+      {flash.kind === "ok" ? "✓" : "✗"} {flash.text}
+    </div>
+  );
 }
 
 function ModelList({
@@ -129,6 +146,48 @@ export function SettingsPage({
   onPickSpeakerWav,
   onRefreshSpeakers,
 }: Props) {
+  const [saving, setSaving] = useState<SaveSection | null>(null);
+  const [generalFlash, setGeneralFlash] = useState<SaveFlash | null>(null);
+  const [providerFlash, setProviderFlash] = useState<SaveFlash | null>(null);
+
+  useEffect(() => {
+    if (generalFlash?.kind !== "ok") return;
+    const t = window.setTimeout(() => setGeneralFlash(null), 4000);
+    return () => window.clearTimeout(t);
+  }, [generalFlash]);
+
+  useEffect(() => {
+    if (providerFlash?.kind !== "ok") return;
+    const t = window.setTimeout(() => setProviderFlash(null), 4000);
+    return () => window.clearTimeout(t);
+  }, [providerFlash]);
+
+  async function handleSave(section: SaveSection) {
+    const setFlash = section === "general" ? setGeneralFlash : setProviderFlash;
+    setSaving(section);
+    setFlash(null);
+    try {
+      await onSave();
+      setFlash({
+        kind: "ok",
+        text:
+          section === "general"
+            ? "Đã lưu cài đặt thành công."
+            : "Đã lưu nhà cung cấp thành công.",
+      });
+    } catch (e) {
+      setFlash({
+        kind: "err",
+        text:
+          section === "general"
+            ? `Lưu cài đặt thất bại: ${e}`
+            : `Lưu nhà cung cấp thất bại: ${e}`,
+      });
+    } finally {
+      setSaving(null);
+    }
+  }
+
   const whisperModels = models.filter((m) => (m.kind || "whisper") === "whisper");
   const translateModels = models.filter((m) => m.kind === "translate");
   const ttsModels = models.filter((m) => m.kind === "tts");
@@ -221,13 +280,19 @@ export function SettingsPage({
           </label>
         </div>
         <div className="actions">
-          <button type="button" className="primary" onClick={onSave}>
-            Lưu cài đặt
+          <button
+            type="button"
+            className="primary"
+            disabled={saving !== null}
+            onClick={() => void handleSave("general")}
+          >
+            {saving === "general" ? "Đang lưu…" : "Lưu cài đặt"}
           </button>
           <button type="button" onClick={onDoctor}>
             Kiểm tra FFmpeg &amp; engine
           </button>
         </div>
+        <SaveStatus flash={generalFlash} />
         {doctor && (
           <ul className="doctor">
             {doctor.checks.map((c) => (
@@ -336,10 +401,16 @@ export function SettingsPage({
           </p>
         )}
         <div className="actions">
-          <button type="button" className="primary" onClick={onSave}>
-            Lưu nhà cung cấp
+          <button
+            type="button"
+            className="primary"
+            disabled={saving !== null}
+            onClick={() => void handleSave("providers")}
+          >
+            {saving === "providers" ? "Đang lưu…" : "Lưu nhà cung cấp"}
           </button>
         </div>
+        <SaveStatus flash={providerFlash} />
       </section>
 
       <section className="panel">
