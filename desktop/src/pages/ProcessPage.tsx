@@ -237,7 +237,7 @@ export function ProcessPage(props: Props) {
               >
                 {!xttsSpeakers.length ? (
                   <option value="">
-                    Chưa có mẫu — tải XTTS trong Settings
+                    Chưa có mẫu — tải model giọng đọc trong Settings
                   </option>
                 ) : (
                   xttsSpeakers.map((s) => (
@@ -259,12 +259,12 @@ export function ProcessPage(props: Props) {
           </div>
           {ttsProvider === "xtts-v2" ? (
             <p className="muted" style={{ marginTop: "-0.35rem" }}>
-              Đang dùng TTS offline (XTTS). Giọng Edge (Hoài My…) chỉ hiện khi chọn
-              edge-tts trong Settings.
+              Đang tạo giọng đọc offline trên máy. Giọng Edge (Hoài My…) chỉ hiện khi
+              chọn Microsoft Edge trong Settings.
             </p>
           ) : null}
           <div className="row">
-            <label>Whisper</label>
+            <label>Nhận dạng lời nói</label>
             <select value={model} onChange={(e) => onModel(e.target.value)}>
               {MODELS.map((m) => (
                 <option key={m} value={m}>
@@ -301,8 +301,8 @@ export function ProcessPage(props: Props) {
                 checked={review}
                 onChange={(e) => onReview(e.target.checked)}
               />{" "}
-              Sửa bản dịch trước TTS
-              <CheckHelp tip="Chọn khi muốn dừng lại xem/sửa bản dịch Việt trước khi tạo giọng. Video mới thường để trống." />
+              Sửa bản dịch trước khi tạo giọng
+              <CheckHelp tip="Chọn khi muốn dừng lại xem/sửa bản dịch Việt trước khi tạo giọng đọc. Video mới thường để trống." />
             </label>
             <label>
               <input

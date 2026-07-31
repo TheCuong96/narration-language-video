@@ -9,9 +9,9 @@ import type { QueueItem } from "./types";
 /** Weights aligned with engine/dubvi/progress.py (display stages). */
 export const STAGE_LEGEND = [
   { key: "extracting", label: "Tách audio", weight: 5 },
-  { key: "transcribing", label: "Whisper", weight: 40 },
+  { key: "transcribing", label: "Nhận dạng lời nói", weight: 40 },
   { key: "translating", label: "Dịch", weight: 15 },
-  { key: "tts", label: "TTS", weight: 25 },
+  { key: "tts", label: "Tạo giọng đọc", weight: 25 },
   { key: "aligning", label: "Căn giờ", weight: 8 },
   { key: "muxing", label: "Ghép", weight: 4 },
 ] as const;

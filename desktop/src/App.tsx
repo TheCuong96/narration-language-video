@@ -555,7 +555,7 @@ export default function App() {
     try {
       await reviewSet(jobId, reviewStem, segments);
       await continueAfterReview(jobId, reviewStem, onEngineEvent);
-      setStageLabel(`TTS: ${reviewStem}`);
+      setStageLabel(`Tạo giọng đọc: ${reviewStem}`);
       setPage("process");
     } catch (e) {
       setBusy(false);
@@ -576,7 +576,6 @@ export default function App() {
           {(
             [
               ["process", "Xử lý"],
-              ["transcript", "Transcript"],
               ["settings", "Settings"],
             ] as const
           ).map(([id, label]) => (

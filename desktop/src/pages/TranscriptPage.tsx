@@ -35,8 +35,8 @@ export function TranscriptPage({
       <section className="panel">
         <h2>Transcript editor</h2>
         <p className="muted">
-          Chưa có bản dịch để sửa. Bật «Sửa bản dịch trước TTS» rồi chạy job, hoặc mở
-          mục đang ở trạng thái Review trong hàng đợi.
+          Chưa có bản dịch để sửa. Bật «Sửa bản dịch trước khi tạo giọng» rồi chạy
+          job, hoặc mở mục đang ở trạng thái Review trong hàng đợi.
         </p>
       </section>
     );

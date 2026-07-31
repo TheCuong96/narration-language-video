@@ -23,7 +23,7 @@ STAGE_WEIGHTS: dict[str, float] = {
 STAGE_LABELS: dict[str, str] = {
     Stage.INIT.value: "Chuẩn bị",
     Stage.EXTRACTING.value: "Tách âm thanh",
-    Stage.TRANSCRIBING.value: "Nhận dạng lời nói (Whisper)",
+    Stage.TRANSCRIBING.value: "Nhận dạng lời nói",
     Stage.TRANSLATING.value: "Dịch sang tiếng Việt",
     Stage.REVIEW.value: "Chờ sửa bản dịch",
     Stage.TTS.value: "Tạo giọng đọc",

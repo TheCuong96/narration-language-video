@@ -152,7 +152,7 @@ export function SettingsPage({
       <section className="panel">
         <h2>Cài đặt chung</h2>
         <div className="row">
-          <label>Model Whisper</label>
+          <label>Model nhận dạng lời nói</label>
           <select
             value={settings.whisper_model}
             onChange={(e) => onChange({ ...settings, whisper_model: e.target.value })}
@@ -248,8 +248,8 @@ export function SettingsPage({
           Online (mặc định) không cần model lớn. Offline cần{" "}
           <code>pip uninstall -y TTS coqpit</code> rồi{" "}
           <code>pip install -r engine/requirements-offline.txt</code> và tải model bên
-          dưới. XTTS nên bật <strong>Auto GPU</strong>. License XTTS: Coqui CPML (không
-          thương mại).
+          dưới. Giọng đọc offline nên bật <strong>Auto GPU</strong>. License model
+          offline: Coqui CPML (không thương mại).
         </p>
         <div className="row">
           <label>Dịch thuật</label>
@@ -259,24 +259,24 @@ export function SettingsPage({
               onChange({ ...settings, translate_provider: e.target.value })
             }
           >
-            <option value="deep-translator">Google (deep-translator) — online</option>
-            <option value="nllb">NLLB-200 — offline</option>
+            <option value="deep-translator">Google — online (cần Internet)</option>
+            <option value="nllb">Offline trên máy (NLLB)</option>
           </select>
         </div>
         <div className="row">
-          <label>Giọng đọc (TTS)</label>
+          <label>Cách tạo giọng đọc</label>
           <select
             value={settings.tts_provider}
             onChange={(e) => onChange({ ...settings, tts_provider: e.target.value })}
           >
-            <option value="edge-tts">Microsoft Edge TTS — online</option>
-            <option value="xtts-v2">XTTS-v2 (viXTTS) — offline</option>
+            <option value="edge-tts">Microsoft Edge — online (cần Internet)</option>
+            <option value="xtts-v2">Offline trên máy (XTTS)</option>
           </select>
         </div>
         {offlineTts && (
           <>
             <div className="row">
-              <label>Giọng mẫu (Speaker)</label>
+              <label>Giọng mẫu</label>
               <select
                 value={selectValue}
                 onChange={(e) => {
@@ -291,7 +291,7 @@ export function SettingsPage({
               >
                 {!xttsSpeakers.length && (
                   <option value="">
-                    Chưa có mẫu — hãy tải model XTTS-v2 bên dưới
+                    Chưa có mẫu — hãy tải model giọng đọc bên dưới
                   </option>
                 )}
                 {xttsSpeakers.map((s) => (
@@ -303,8 +303,8 @@ export function SettingsPage({
               </select>
             </div>
             <p className="muted">
-              Đây là <strong>file giọng mẫu 3–10 giây</strong> để XTTS bắt chước
-              giọng. Các lựa chọn trên lấy từ model viXTTS đã tải (thư mục{" "}
+              Đây là <strong>file giọng mẫu 3–10 giây</strong> để máy bắt chước
+              giọng. Các lựa chọn trên lấy từ model giọng đọc đã tải (thư mục{" "}
               <code>%LOCALAPPDATA%\DubVI\models\xtts-v2\samples</code>). Để trống /
               chọn mặc định cũng được — app dùng{" "}
               <code>speaker_default.wav</code>.
@@ -327,9 +327,11 @@ export function SettingsPage({
         )}
         {(offlineTranslate || offlineTts) && (
           <p className="muted">
-            {offlineTranslate ? "Đã chọn NLLB — tải model dịch bên dưới. " : null}
+            {offlineTranslate
+              ? "Đã chọn dịch offline — tải model dịch bên dưới. "
+              : null}
             {offlineTts
-              ? "Đã chọn XTTS — tải model TTS bên dưới rồi chọn giọng mẫu ở dropdown."
+              ? "Đã chọn tạo giọng offline — tải model giọng đọc bên dưới rồi chọn giọng mẫu."
               : null}
           </p>
         )}
@@ -341,9 +343,10 @@ export function SettingsPage({
       </section>
 
       <section className="panel">
-        <h2>Model Whisper (tải khi cần)</h2>
+        <h2>Model nhận dạng lời nói (tải khi cần)</h2>
         <p className="muted">
-          Model <strong>không</strong> nằm trong bộ cài. Lưu tại{" "}
+          Model dùng để nghe video và viết lại lời nói thành chữ.{" "}
+          <strong>Không</strong> nằm trong bộ cài — lưu tại{" "}
           <code>%LOCALAPPDATA%\DubVI\models</code>. Đề xuất <strong>small</strong> cho
           máy CPU phổ thông. Tải sẽ báo dung lượng trước — không tải âm thầm.
         </p>
@@ -362,17 +365,17 @@ export function SettingsPage({
       </section>
 
       <section className="panel">
-        <h2>Model offline — dịch (NLLB) &amp; TTS (XTTS)</h2>
+        <h2>Model offline — dịch thuật &amp; tạo giọng đọc</h2>
         <p className="muted">
-          ~2–4 GB mỗi model. Cần Internet lúc tải; sau đó chạy local. XTTS nặng — GPU
-          NVIDIA khuyến nghị.
+          ~2–4 GB mỗi model. Cần Internet lúc tải; sau đó chạy trên máy. Model tạo
+          giọng đọc khá nặng — nên có GPU NVIDIA.
         </p>
         <div className="actions">
           <button type="button" onClick={onRefreshModels}>
             Làm mới danh sách
           </button>
         </div>
-        <h3>Dịch NLLB</h3>
+        <h3>Dịch thuật (NLLB)</h3>
         <ModelList
           models={translateModels}
           downloading={downloading}
@@ -380,7 +383,7 @@ export function SettingsPage({
           onDownload={onDownload}
           onDelete={onDelete}
         />
-        <h3>TTS XTTS-v2</h3>
+        <h3>Tạo giọng đọc (XTTS)</h3>
         <ModelList
           models={ttsModels}
           downloading={downloading}
