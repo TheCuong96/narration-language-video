@@ -54,6 +54,7 @@ interface Props {
   force: boolean;
   preferGpu: boolean;
   busy: boolean;
+  canResume: boolean;
   stageLabel: string;
   fileProgress: {
     current: number;
@@ -87,6 +88,7 @@ interface Props {
   onGpu: (v: boolean) => void;
   onStart: () => void;
   onStop: () => void;
+  onResume: () => void;
   onRetry: () => void;
   onOpenOut: () => void;
   onOpenReview: (stem: string) => void;
@@ -105,6 +107,7 @@ export function ProcessPage(props: Props) {
     force,
     preferGpu,
     busy,
+    canResume,
     stageLabel,
     fileProgress,
     overallProgress,
@@ -126,6 +129,7 @@ export function ProcessPage(props: Props) {
     onGpu,
     onStart,
     onStop,
+    onResume,
     onRetry,
     onOpenOut,
     onOpenReview,
@@ -284,7 +288,15 @@ export function ProcessPage(props: Props) {
               Bắt đầu
             </button>
             <button type="button" className="danger" disabled={!busy} onClick={onStop}>
-              Dừng
+              Tạm dừng
+            </button>
+            <button
+              type="button"
+              className="primary"
+              disabled={busy || !canResume}
+              onClick={onResume}
+            >
+              Tiếp tục
             </button>
             <button type="button" disabled={busy} onClick={onRetry}>
               Thử lại lỗi

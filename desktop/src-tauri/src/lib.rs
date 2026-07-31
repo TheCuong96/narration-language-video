@@ -77,6 +77,16 @@ async fn retry_failed(
 }
 
 #[tauri::command]
+async fn resume_job(
+    app: AppHandle,
+    state: State<'_, Mutex<EngineState>>,
+    job_id: String,
+    stems: Option<Vec<String>>,
+) -> Result<(), String> {
+    engine::resume_job(app, state, job_id, stems).await
+}
+
+#[tauri::command]
 async fn get_queue(job_id: String) -> Result<Value, String> {
     engine::run_engine_json(&["queue", "--job-id", &job_id]).await
 }
@@ -152,6 +162,7 @@ pub fn run() {
             start_job,
             cancel_job,
             retry_failed,
+            resume_job,
             get_queue,
             review_get,
             review_set,

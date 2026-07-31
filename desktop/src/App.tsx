@@ -7,12 +7,14 @@ import {
   doctor as runDoctor,
   downloadModel,
   filterVideoFiles,
+  getQueue,
   getSettings,
   listModels,
   openFolder,
   pickOutputDir,
   pickVideos,
   probeVideos,
+  resumeJob,
   retryFailed,
   reviewGet,
   reviewSet,
@@ -118,6 +120,8 @@ export default function App() {
   const sawTerminalRef = useRef(false);
   /** User pressed Stop — don't treat taskkill exit as a crash dialog. */
   const userStoppedRef = useRef(false);
+  /** Job was stopped and can be resumed from the same job id / stage cache. */
+  const [canResume, setCanResume] = useState(false);
 
   const elapsedSec = useElapsed(busy, jobId);
 
@@ -200,6 +204,7 @@ export default function App() {
         setOverallProgress((p) => ({ ...p, percent: 100 }));
         setFileProgress((p) => ({ ...p, percent: 100, message: "Hoàn tất" }));
         setStageLabel("Hoàn tất");
+        setCanResume(false);
       }
       if (ev.type === "review_ready" && ev.stem && ev.segments) {
         setReviewStem(ev.stem);
@@ -216,6 +221,10 @@ export default function App() {
       if (ev.type === "completed" || ev.type === "cancelled") {
         sawTerminalRef.current = true;
         setBusy(false);
+        if (ev.type === "cancelled") {
+          setCanResume(true);
+          setStageLabel("Đã tạm dừng — bấm Tiếp tục để xử lý tiếp");
+        }
         if (downloading) {
           setDownloading(null);
           setDownloadPct(0);
@@ -231,7 +240,8 @@ export default function App() {
         if (userStoppedRef.current || code === 2) {
           userStoppedRef.current = false;
           sawTerminalRef.current = true;
-          setStageLabel("Đã dừng");
+          setStageLabel("Đã tạm dừng — bấm Tiếp tục để xử lý tiếp");
+          setCanResume(true);
         } else if (
           !sawTerminalRef.current &&
           code !== 0 &&
@@ -372,6 +382,7 @@ export default function App() {
     setBusy(true);
     sawTerminalRef.current = false;
     userStoppedRef.current = false;
+    setCanResume(false);
     setLogs([]);
     setFileProgress({
       current: 0,
@@ -417,26 +428,80 @@ export default function App() {
     userStoppedRef.current = true;
     if (!jobId) {
       setBusy(false);
-      setStageLabel("Đã dừng");
+      setStageLabel("Đã tạm dừng");
       return;
     }
+    // Optimistic UI: mark in-flight items cancelled so Tiếp tục can show.
+    setQueue((prev) =>
+      prev.map((it) =>
+        it.status === "running" ? { ...it, status: "cancelled" } : it,
+      ),
+    );
+    setCanResume(true);
     try {
       await cancelJob(jobId);
-      setStageLabel("Đã gửi lệnh dừng");
+      setStageLabel("Đã tạm dừng — bấm Tiếp tục để xử lý tiếp");
       setBusy(false);
+      try {
+        const q = await getQueue(jobId);
+        if (q?.items?.length) {
+          setQueue((prev) => {
+            const meta = new Map(prev.map((p) => [p.stem, p]));
+            return q.items.map((it) => ({
+              ...it,
+              duration_label: meta.get(it.stem)?.duration_label,
+              size_label: meta.get(it.stem)?.size_label,
+              duration_sec: meta.get(it.stem)?.duration_sec,
+              size_bytes: meta.get(it.stem)?.size_bytes,
+            }));
+          });
+          const resumable = q.items.some((it) =>
+            ["pending", "failed", "cancelled", "running"].includes(it.status),
+          );
+          setCanResume(resumable);
+        }
+      } catch {
+        /* keep optimistic state */
+      }
     } catch (e) {
       pushLog({ text: String(e), cls: "error" });
       // Unblock UI even if cancel CLI/engine fails
       setBusy(false);
-      setStageLabel("Đã dừng (ép)");
+      setStageLabel("Đã tạm dừng (ép) — bấm Tiếp tục để xử lý tiếp");
+      setCanResume(true);
+    }
+  }
+
+  async function onResume() {
+    if (!jobId) return;
+    setBusy(true);
+    sawTerminalRef.current = false;
+    userStoppedRef.current = false;
+    setCanResume(false);
+    setStageLabel("Đang tiếp tục từ công đoạn đã dừng…");
+    try {
+      await resumeJob(jobId, onEngineEvent);
+    } catch (e) {
+      setBusy(false);
+      setCanResume(true);
+      pushLog({ text: String(e), cls: "error" });
+      setErrFriendly({
+        title: "Không tiếp tục được",
+        body: String(e),
+      });
+      setErrTech(String(e));
+      setErrOpen(true);
     }
   }
 
   async function onRetry() {
     if (!jobId) return;
     setBusy(true);
+    sawTerminalRef.current = false;
+    userStoppedRef.current = false;
+    setCanResume(false);
     try {
-      await retryFailed(jobId);
+      await retryFailed(jobId, onEngineEvent);
     } catch (e) {
       setBusy(false);
       pushLog({ text: String(e), cls: "error" });
@@ -458,9 +523,10 @@ export default function App() {
   async function saveAndContinue() {
     if (!jobId || !reviewStem) return;
     setBusy(true);
+    sawTerminalRef.current = false;
     try {
       await reviewSet(jobId, reviewStem, segments);
-      await continueAfterReview(jobId, reviewStem);
+      await continueAfterReview(jobId, reviewStem, onEngineEvent);
       setStageLabel(`TTS: ${reviewStem}`);
       setPage("process");
     } catch (e) {
@@ -511,6 +577,7 @@ export default function App() {
           force={force}
           preferGpu={preferGpu}
           busy={busy}
+          canResume={canResume}
           stageLabel={stageLabel}
           fileProgress={fileProgress}
           overallProgress={overallProgress}
@@ -535,6 +602,7 @@ export default function App() {
           onGpu={setPreferGpu}
           onStart={onStart}
           onStop={onStop}
+          onResume={onResume}
           onRetry={onRetry}
           onOpenOut={() => outputDir && openFolder(outputDir)}
           onOpenReview={loadReview}

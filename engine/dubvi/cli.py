@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 
 from . import __version__, events, queue, review
-from .jobs import load_job_state, request_cancel
+from .jobs import load_job_state, request_cancel, update_job_state
 from .models import (
     DEFAULT_MIX_ORIGINAL_DB,
     DEFAULT_MODEL,
@@ -74,6 +74,18 @@ def _build_parser() -> argparse.ArgumentParser:
     retry_p.add_argument("--cpu", action="store_true")
     retry_p.add_argument("--human", action="store_true")
     retry_p.add_argument("--audio-mode", choices=[m.value for m in AudioMode], default=None)
+
+    resume_p = sub.add_parser(
+        "resume",
+        help="Continue a stopped/cancelled job from cached stages (same job id)",
+    )
+    resume_p.add_argument("--job-id", required=True)
+    resume_p.add_argument("--output", "-o", type=Path, default=None)
+    resume_p.add_argument("--stem", nargs="*", default=[])
+    resume_p.add_argument("--gpu", action="store_true")
+    resume_p.add_argument("--cpu", action="store_true")
+    resume_p.add_argument("--human", action="store_true")
+    resume_p.add_argument("--audio-mode", choices=[m.value for m in AudioMode], default=None)
 
     cont = sub.add_parser("continue", help="Continue after translation review")
     cont.add_argument("--job-id", required=True)
@@ -276,7 +288,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "cancel":
         path = request_cancel(args.job_id)
-        print(json.dumps({"ok": True, "flag": str(path)}, ensure_ascii=False))
+        qdata = queue.mark_active_cancelled(args.job_id)
+        update_job_state(args.job_id, status="cancelled")
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "flag": str(path),
+                    "queue": qdata,
+                },
+                ensure_ascii=False,
+            )
+        )
         return 0
 
     if args.command == "list-voices":
@@ -358,6 +381,48 @@ def main(argv: list[str] | None = None) -> int:
             retry_stems=stems,
             start_from=StartFrom.AUTO,
             review_translation=bool(opts.get("review_translation")),
+        )
+        return run_job(cfg)
+
+    if args.command == "resume":
+        events.set_json_mode(not args.human)
+        state = load_job_state(args.job_id)
+        if not state:
+            events.error(ErrorCode.INPUT_NOT_FOUND, f"Không thấy job {args.job_id}", fatal=True)
+            return 1
+        # Soft-cancel may leave items as running; normalize before resume.
+        queue.mark_active_cancelled(args.job_id)
+        stems = list(args.stem) if args.stem else queue.resumable_stems(args.job_id)
+        if not stems:
+            events.error(
+                ErrorCode.NO_VIDEOS,
+                "Không có mục nào để tiếp tục (đã xong hoặc đang chờ review)",
+                fatal=True,
+            )
+            return 1
+        opts = state.get("options") or {}
+        out_dir = Path(args.output) if args.output else Path(state["output_dir"])
+        q = queue.load_queue(args.job_id) or {"items": []}
+        files = [Path(i["input"]) for i in q["items"] if i["stem"] in stems]
+        mode = AudioMode(args.audio_mode or opts.get("audio_mode") or AudioMode.VI_ONLY.value)
+        prefer_gpu = bool(opts.get("prefer_gpu"))
+        if args.gpu:
+            prefer_gpu = True
+        if args.cpu:
+            prefer_gpu = False
+        cfg = JobConfig(
+            output_dir=out_dir.resolve(),
+            job_id=args.job_id,
+            input_files=files,
+            voice=opts.get("voice") or DEFAULT_VOICE,
+            whisper_model=opts.get("model") or DEFAULT_MODEL,
+            prefer_gpu=prefer_gpu,
+            audio_mode=mode,
+            retry_stems=stems,
+            start_from=StartFrom.AUTO,
+            review_translation=bool(opts.get("review_translation")),
+            # Never force-clear cache on resume — continue from last completed stage.
+            force=False,
         )
         return run_job(cfg)
 

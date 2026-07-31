@@ -25,6 +25,16 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
 
 let unlistenRef: (() => void) | null = null;
 
+async function ensureEngineListen(onEvent: EventHandler): Promise<void> {
+  if (!(await isTauri())) return;
+  const { listen } = await import("@tauri-apps/api/event");
+  if (unlistenRef) {
+    unlistenRef();
+    unlistenRef = null;
+  }
+  unlistenRef = await listen<EngineEvent>("engine-event", (e) => onEvent(e.payload));
+}
+
 export async function pickVideos(): Promise<string[]> {
   return invoke<string[]>("pick_videos");
 }
@@ -43,12 +53,7 @@ export async function probeVideos(paths: string[]): Promise<ProbeInfo[]> {
 
 export async function startJob(options: JobOptions, onEvent: EventHandler): Promise<string> {
   if (!(await isTauri())) throw new Error("Cần Tauri để bắt đầu job");
-  const { listen } = await import("@tauri-apps/api/event");
-  if (unlistenRef) {
-    unlistenRef();
-    unlistenRef = null;
-  }
-  unlistenRef = await listen<EngineEvent>("engine-event", (e) => onEvent(e.payload));
+  await ensureEngineListen(onEvent);
   return invoke<string>("start_job", { options });
 }
 
@@ -56,8 +61,22 @@ export async function cancelJob(jobId: string): Promise<void> {
   await invoke("cancel_job", { jobId });
 }
 
-export async function retryFailed(jobId: string, stems?: string[]): Promise<void> {
+export async function retryFailed(
+  jobId: string,
+  onEvent?: EventHandler,
+  stems?: string[],
+): Promise<void> {
+  if (onEvent) await ensureEngineListen(onEvent);
   await invoke("retry_failed", { jobId, stems: stems ?? null });
+}
+
+export async function resumeJob(
+  jobId: string,
+  onEvent?: EventHandler,
+  stems?: string[],
+): Promise<void> {
+  if (onEvent) await ensureEngineListen(onEvent);
+  await invoke("resume_job", { jobId, stems: stems ?? null });
 }
 
 export async function getQueue(jobId: string): Promise<QueueState> {
@@ -76,7 +95,12 @@ export async function reviewSet(
   await invoke("review_set", { jobId, stem, segments });
 }
 
-export async function continueAfterReview(jobId: string, stem: string): Promise<void> {
+export async function continueAfterReview(
+  jobId: string,
+  stem: string,
+  onEvent?: EventHandler,
+): Promise<void> {
+  if (onEvent) await ensureEngineListen(onEvent);
   await invoke("continue_after_review", { jobId, stem });
 }
 

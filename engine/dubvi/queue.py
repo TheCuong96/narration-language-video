@@ -172,3 +172,36 @@ def pending_or_failed(job_id: str) -> list[str]:
         QueueItemStatus.CANCELLED.value,
     }
     return [i["stem"] for i in data["items"] if i.get("status") in want]
+
+
+def resumable_stems(job_id: str) -> list[str]:
+    """Stems that can continue after stop/cancel (same job, StartFrom.AUTO).
+
+    Includes cancelled, stuck running (hard-kill), pending, and failed.
+    Review items keep the dedicated continue-after-review path.
+    """
+    data = load_queue(job_id)
+    if not data:
+        return []
+    want = {
+        QueueItemStatus.PENDING.value,
+        QueueItemStatus.FAILED.value,
+        QueueItemStatus.CANCELLED.value,
+        QueueItemStatus.RUNNING.value,
+    }
+    return [i["stem"] for i in data["items"] if i.get("status") in want]
+
+
+def mark_active_cancelled(job_id: str) -> dict[str, Any] | None:
+    """Mark running items as cancelled so UI/resume can continue them."""
+    data = load_queue(job_id)
+    if not data:
+        return None
+    changed = False
+    for item in data["items"]:
+        if item.get("status") == QueueItemStatus.RUNNING.value:
+            item["status"] = QueueItemStatus.CANCELLED.value
+            changed = True
+    if changed:
+        save_queue(job_id, data)
+    return data

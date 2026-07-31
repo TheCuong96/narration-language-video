@@ -359,6 +359,27 @@ pub async fn retry_failed(
     spawn_streaming(app, shared, args, job_id)
 }
 
+pub async fn resume_job(
+    app: AppHandle,
+    state: State<'_, Mutex<EngineState>>,
+    job_id: String,
+    stems: Option<Vec<String>>,
+) -> Result<(), String> {
+    let mut args = vec!["resume".into(), "--job-id".into(), job_id.clone()];
+    if let Some(s) = stems {
+        if !s.is_empty() {
+            args.push("--stem".into());
+            args.extend(s);
+        }
+    }
+    {
+        let mut st = state.lock().map_err(|e| e.to_string())?;
+        st.current_job_id = Some(job_id.clone());
+    }
+    let shared = state_arc(&state)?;
+    spawn_streaming(app, shared, args, job_id)
+}
+
 pub async fn continue_after_review(
     app: AppHandle,
     state: State<'_, Mutex<EngineState>>,
