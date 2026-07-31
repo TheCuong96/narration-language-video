@@ -16,6 +16,7 @@ class AppSettings:
     whisper_model: str = "small"
     device_mode: str = "cpu"  # cpu | auto
     default_output_dir: str = ""
+    default_download_dir: str = ""
     cleanup_temps: bool = True
     mix_original_db: float = DEFAULT_MIX_ORIGINAL_DB
     voice: str = DEFAULT_VOICE

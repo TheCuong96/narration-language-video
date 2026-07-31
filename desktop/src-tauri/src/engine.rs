@@ -467,6 +467,30 @@ pub async fn download_model(
     spawn_streaming(app, shared, args, format!("model-{model_id}"))
 }
 
+pub async fn download_url(
+    app: AppHandle,
+    state: State<'_, Mutex<EngineState>>,
+    url: String,
+    download_dir: Option<String>,
+) -> Result<String, String> {
+    let job_id = format!("url-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+    let mut args = vec!["download-url".into(), url];
+    if let Some(dir) = download_dir {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            args.push("--output-dir".into());
+            args.push(trimmed.to_string());
+        }
+    }
+    {
+        let mut st = state.lock().map_err(|e| e.to_string())?;
+        st.current_job_id = Some(job_id.clone());
+    }
+    let shared = state_arc(&state)?;
+    spawn_streaming(app, shared, args, job_id.clone())?;
+    Ok(job_id)
+}
+
 pub async fn save_settings(settings: Value) -> Result<(), String> {
     let dir = std::env::temp_dir().join(format!("dubvi-settings-{}.json", uuid::Uuid::new_v4()));
     {

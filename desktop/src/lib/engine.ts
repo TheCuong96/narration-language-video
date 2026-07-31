@@ -44,6 +44,10 @@ export async function pickOutputDir(): Promise<string | null> {
   return invoke<string | null>("pick_output_dir");
 }
 
+export async function pickDownloadDir(): Promise<string | null> {
+  return invoke<string | null>("pick_download_dir");
+}
+
 export async function pickSpeakerWav(): Promise<string | null> {
   return invoke<string | null>("pick_speaker_wav");
 }
@@ -58,6 +62,100 @@ export async function openFolder(path: string): Promise<void> {
 
 export async function probeVideos(paths: string[]): Promise<ProbeInfo[]> {
   return invoke<ProbeInfo[]>("probe_videos", { paths });
+}
+
+export interface UrlProbeInfo {
+  ok: boolean;
+  url: string;
+  id: string;
+  title: string;
+  extractor?: string;
+  webpage_url?: string;
+  duration_sec?: number | null;
+  duration_label?: string;
+  size_bytes?: number | null;
+  size_label?: string;
+  ext?: string;
+  uploader?: string;
+  is_live?: boolean;
+  code?: string;
+  error?: string;
+}
+
+export interface UrlHelpInfo {
+  summary: string;
+  typically_works: string[];
+  often_fails_or_unsupported: string[];
+  tips: string[];
+  supported_sites_url: string;
+  yt_dlp_version?: string | null;
+}
+
+export async function probeUrl(url: string): Promise<UrlProbeInfo> {
+  return invoke<UrlProbeInfo>("probe_url", { url });
+}
+
+export async function urlHelp(): Promise<UrlHelpInfo> {
+  return invoke<UrlHelpInfo>("url_help");
+}
+
+/** Download remote video via yt-dlp; resolves to local absolute path. */
+export async function downloadUrl(
+  url: string,
+  onEvent?: EventHandler,
+  onJobId?: (jobId: string) => void,
+  downloadDir?: string | null,
+): Promise<string> {
+  if (!(await isTauri())) throw new Error("Cần Tauri để tải video từ URL");
+  const { listen } = await import("@tauri-apps/api/event");
+  const dir = (downloadDir || "").trim() || null;
+  return new Promise<string>((resolve, reject) => {
+    let settled = false;
+    let unlisten: (() => void) | null = null;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      unlisten?.();
+      fn();
+    };
+    void listen<EngineEvent>("engine-event", (e) => {
+      const ev = e.payload;
+      onEvent?.(ev);
+      if (ev.type === "completed" && (ev.output || ev.path)) {
+        finish(() => resolve(String(ev.output || ev.path)));
+        return;
+      }
+      if (ev.type === "error" && ev.fatal) {
+        const msg =
+          ev.friendly?.body ||
+          ev.message ||
+          "Không tải được video từ URL.";
+        finish(() => reject(new Error(msg)));
+        return;
+      }
+      if (ev.type === "cancelled") {
+        finish(() => reject(new Error("Đã hủy tải video.")));
+        return;
+      }
+      if (ev.type === "engine_exited") {
+        const code = typeof ev.code === "number" ? ev.code : Number(ev.code);
+        if (!settled && code !== 0 && !Number.isNaN(code)) {
+          finish(() =>
+            reject(new Error(`Tải video thất bại (mã ${code}).`)),
+          );
+        }
+      }
+    }).then((un) => {
+      unlisten = un;
+      invoke<string>("download_url", { url, downloadDir: dir })
+        .then((jobId) => {
+          if (jobId) onJobId?.(jobId);
+        })
+        .catch((err) => {
+          finish(() => reject(err instanceof Error ? err : new Error(String(err))));
+        });
+    });
+  });
 }
 
 export async function startJob(options: JobOptions, onEvent: EventHandler): Promise<string> {

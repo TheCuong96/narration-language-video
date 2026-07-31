@@ -100,6 +100,48 @@ FRIENDLY: dict[str, FriendlyError] = {
         "Một số đoạn tiếng Việt còn trống hoặc sai định dạng.",
         "",
     ),
+    ErrorCode.YTDLP_NOT_FOUND.value: FriendlyError(
+        ErrorCode.YTDLP_NOT_FOUND.value,
+        "Thiếu yt-dlp",
+        "Chưa cài công cụ tải video (yt-dlp).",
+        "Trong thư mục engine chạy: pip install -r requirements-base.txt",
+    ),
+    ErrorCode.YTDLP_INVALID_URL.value: FriendlyError(
+        ErrorCode.YTDLP_INVALID_URL.value,
+        "URL không hợp lệ",
+        "Hãy dán liên kết video đầy đủ bắt đầu bằng http:// hoặc https://.",
+        "",
+    ),
+    ErrorCode.YTDLP_UNSUPPORTED_OR_CHANGED_SITE.value: FriendlyError(
+        ErrorCode.YTDLP_UNSUPPORTED_OR_CHANGED_SITE.value,
+        "Không hỗ trợ link này",
+        "Website chưa được hỗ trợ hoặc vừa thay đổi khiến không tải được.",
+        "Thử video công khai trên YouTube, hoặc cập nhật yt-dlp rồi thử lại.",
+    ),
+    ErrorCode.YTDLP_AUTH_REQUIRED.value: FriendlyError(
+        ErrorCode.YTDLP_AUTH_REQUIRED.value,
+        "Video cần đăng nhập",
+        "Nội dung riêng tư, trả phí hoặc bị hạn chế — app chưa hỗ trợ cookie/đăng nhập.",
+        "Dùng video công khai, hoặc tải file về máy rồi kéo thả vào Dub VI.",
+    ),
+    ErrorCode.YTDLP_NETWORK.value: FriendlyError(
+        ErrorCode.YTDLP_NETWORK.value,
+        "Lỗi mạng khi tải video",
+        "Kết nối bị gián đoạn hoặc quá chậm.",
+        "Kiểm tra Internet rồi thử lại.",
+    ),
+    ErrorCode.YTDLP_FORMAT_UNAVAILABLE.value: FriendlyError(
+        ErrorCode.YTDLP_FORMAT_UNAVAILABLE.value,
+        "Không có định dạng phù hợp",
+        "Không tìm được chất lượng/video tải được từ link này.",
+        "Thử link khác hoặc tải thủ công rồi chọn file local.",
+    ),
+    ErrorCode.YTDLP_DOWNLOAD_FAILED.value: FriendlyError(
+        ErrorCode.YTDLP_DOWNLOAD_FAILED.value,
+        "Tải video thất bại",
+        "Không tải được video từ URL đã dán.",
+        "YouTube cần Deno: winget install DenoLand.Deno — rồi pip install -U \"yt-dlp[default]\". Hoặc tải file thủ công rồi kéo thả.",
+    ),
 }
 
 

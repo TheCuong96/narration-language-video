@@ -125,6 +125,30 @@ def _build_parser() -> argparse.ArgumentParser:
     probe_p = sub.add_parser("probe", help="Probe video duration/size for UI")
     probe_p.add_argument("paths", nargs="+", type=Path)
 
+    probe_url_p = sub.add_parser(
+        "probe-url",
+        help="Probe remote video metadata via yt-dlp (no download)",
+    )
+    probe_url_p.add_argument("url", help="http(s) video URL")
+
+    dl_url_p = sub.add_parser(
+        "download-url",
+        help="Download a remote video via yt-dlp into AppData downloads",
+    )
+    dl_url_p.add_argument("url", help="http(s) video URL")
+    dl_url_p.add_argument(
+        "--output-dir",
+        "-o",
+        type=Path,
+        default=None,
+        help="Optional download folder (default: %%LOCALAPPDATA%%/DubVI/downloads/<id>)",
+    )
+
+    url_help_p = sub.add_parser(
+        "url-help",
+        help="JSON guidance: which URLs/sites can be downloaded",
+    )
+
     models_p = sub.add_parser("models", help="List Whisper / NLLB / XTTS models")
     models_p.add_argument(
         "--kind",
@@ -157,7 +181,7 @@ def _build_parser() -> argparse.ArgumentParser:
     xtts_sp.add_argument("--model-id", default="xtts-v2")
 
     privacy = sub.add_parser("privacy-notice", help="Print privacy notice JSON")
-    _ = (models_p, privacy, doctor, xtts_sp)
+    _ = (models_p, privacy, doctor, xtts_sp, url_help_p)
 
     return p
 
@@ -215,6 +239,7 @@ def _privacy_notice() -> dict:
         leaves.append("Không gửi transcript/TTS ra mạng khi dùng NLLB + XTTS (trừ lúc tải model).")
     stays = [
         "File video gốc và kết quả.",
+        "Video tải từ URL (yt-dlp) lưu local trong %LOCALAPPDATA%/DubVI/downloads.",
         "Whisper model và nhận dạng lời nói.",
         "FFmpeg tách/ghép media.",
         "Cache job trong %LOCALAPPDATA%/DubVI.",
@@ -276,6 +301,37 @@ def main(argv: list[str] | None = None) -> int:
             except EngineError as e:
                 report["ok"] = False
                 report["checks"].append({"name": name, "ok": False, "error": e.message})
+        from . import ytdlp as ytdlp_mod
+
+        ytdlp_ver = ytdlp_mod.yt_dlp_version()
+        if ytdlp_ver:
+            report["checks"].append(
+                {"name": "yt-dlp", "ok": True, "version": ytdlp_ver}
+            )
+        else:
+            report["ok"] = False
+            report["checks"].append(
+                {
+                    "name": "yt-dlp",
+                    "ok": False,
+                    "error": "Chưa cài — pip install -r engine/requirements-base.txt",
+                }
+            )
+        js = ytdlp_mod.js_runtime_status()
+        report["checks"].append(
+            {
+                "name": "yt-dlp-js-runtime",
+                "ok": bool(js.get("ok")),
+                "runtime": js.get("runtime"),
+                "path": js.get("path"),
+                "error": None if js.get("ok") else js.get("error"),
+            }
+        )
+        if not js.get("ok"):
+            # Soft warning: other sites may still work without Deno.
+            report.setdefault("warnings", []).append(
+                "YouTube cần Deno/Node — winget install DenoLand.Deno"
+            )
         report["checks"].append(
             {
                 "name": "appdata",
@@ -353,6 +409,43 @@ def main(argv: list[str] | None = None) -> int:
         from .media import probe_many
 
         print(json.dumps(probe_many(list(args.paths)), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "probe-url":
+        from . import ytdlp as ytdlp_mod
+        from .system_info import EngineError
+
+        try:
+            meta = ytdlp_mod.probe_url(args.url)
+            print(json.dumps(meta, ensure_ascii=False, indent=2))
+            return 0
+        except EngineError as e:
+            print(json.dumps({"ok": False, "code": e.code.value, "error": e.message}, ensure_ascii=False))
+            return 1
+        except Exception as e:
+            print(json.dumps({"ok": False, "code": "YTDLP_DOWNLOAD_FAILED", "error": str(e)}, ensure_ascii=False))
+            return 1
+
+    if args.command == "download-url":
+        from . import ytdlp as ytdlp_mod
+        from .system_info import EngineError
+
+        events.set_json_mode(True)
+        try:
+            path = ytdlp_mod.download_url(args.url, out_dir=args.output_dir)
+            events.completed(str(path), path=str(path), input_url=args.url)
+            return 0
+        except EngineError as e:
+            events.error(e.code, e.message, fatal=True)
+            return 1
+        except Exception as e:
+            events.error(ErrorCode.YTDLP_DOWNLOAD_FAILED, str(e), fatal=True)
+            return 1
+
+    if args.command == "url-help":
+        from . import ytdlp as ytdlp_mod
+
+        print(json.dumps(ytdlp_mod.supported_sites_help(), ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "models":

@@ -193,11 +193,16 @@ def stretch_to_duration(
     target_sec: float,
     *,
     allow_spill: bool = True,
-    max_tempo: float = 1.55,
-    min_tempo: float = 0.85,
+    max_tempo: float = 1.20,
+    min_tempo: float = 0.90,
+    fit_slack: float = 0.0,
 ) -> float:
     """
     Fit audio into target_sec using atempo + pad.
+
+    Prefer near-natural speed: caller should expand target_sec by borrowing
+    silence gaps before relying on tempo. Default max_tempo is mild (~20%).
+
     If allow_spill and audio is still longer after max speedup, do NOT trim speech —
     return the actual duration (caller may spill into following gaps).
     Returns the duration written to dst.
@@ -208,7 +213,9 @@ def stretch_to_duration(
         make_silence(dst, target_sec)
         return target_sec
 
-    usable = max(target_sec * 0.95, 0.05)
+    # fit_slack=0 → aim for full target; >0 (e.g. 0.05) leaves a tiny pad margin
+    slack = max(0.0, min(fit_slack, 0.5))
+    usable = max(target_sec * (1.0 - slack), 0.05)
     tempo = dur / usable if usable > 0 else 1.0
     tempo = max(min_tempo, min(tempo, max_tempo))
 
