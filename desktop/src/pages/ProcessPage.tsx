@@ -1,4 +1,4 @@
-import { useMemo, type DragEvent } from "react";
+import { useMemo, type DragEvent, type MouseEvent } from "react";
 import type { AudioMode, QueueItem } from "../lib/types";
 import { formatElapsed } from "../hooks/useElapsed";
 
@@ -7,6 +7,26 @@ function etaFromOverall(elapsedSec: number, overallPct: number): string | null {
   const remain = Math.round((elapsedSec * (100 - overallPct)) / overallPct);
   if (remain < 0 || remain > 24 * 3600) return null;
   return formatElapsed(remain);
+}
+
+function CheckHelp({ tip }: { tip: string }) {
+  const stop = (e: MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  return (
+    <span
+      className="check-help"
+      tabIndex={0}
+      role="note"
+      aria-label={tip}
+      onClick={stop}
+      onMouseDown={stop}
+    >
+      !
+      <span className="check-help-tip">{tip}</span>
+    </span>
+  );
 }
 
 const VOICES = [
@@ -207,6 +227,7 @@ export function ProcessPage(props: Props) {
                 onChange={(e) => onReview(e.target.checked)}
               />{" "}
               Sửa bản dịch trước TTS
+              <CheckHelp tip="Chọn khi muốn dừng lại xem/sửa bản dịch Việt trước khi tạo giọng. Video mới thường để trống." />
             </label>
             <label>
               <input
@@ -215,6 +236,7 @@ export function ProcessPage(props: Props) {
                 onChange={(e) => onForce(e.target.checked)}
               />{" "}
               Làm lại
+              <CheckHelp tip="Chọn khi muốn xử lý lại file đã chạy trước đó (bỏ kết quả cũ). Lần đầu xử lý thì không cần." />
             </label>
             <label>
               <input
@@ -223,6 +245,7 @@ export function ProcessPage(props: Props) {
                 onChange={(e) => onGpu(e.target.checked)}
               />{" "}
               Auto GPU
+              <CheckHelp tip="Chọn nếu máy có card Nvidia và muốn nhận dạng giọng nhanh hơn. Không có Nvidia hoặc lỗi thì app tự dùng CPU." />
             </label>
           </div>
           <div className="actions">
