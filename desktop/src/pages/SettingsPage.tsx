@@ -245,9 +245,11 @@ export function SettingsPage({
       <section className="panel">
         <h2>Nhà cung cấp dịch &amp; giọng đọc</h2>
         <p className="muted">
-          Online (mặc định) không cần model lớn. Offline cần cài{" "}
-          <code>engine/requirements-offline.txt</code> và tải model bên dưới. XTTS nên
-          bật <strong>Auto GPU</strong>. License XTTS: Coqui CPML (không thương mại).
+          Online (mặc định) không cần model lớn. Offline cần{" "}
+          <code>pip uninstall -y TTS coqpit</code> rồi{" "}
+          <code>pip install -r engine/requirements-offline.txt</code> và tải model bên
+          dưới. XTTS nên bật <strong>Auto GPU</strong>. License XTTS: Coqui CPML (không
+          thương mại).
         </p>
         <div className="row">
           <label>Dịch thuật</label>

@@ -314,8 +314,9 @@ def main(argv: list[str] | None = None) -> int:
                 report["ok"] = False
         if settings.tts_provider in ("xtts-v2", "xtts", "vixtts", "offline-tts"):
             try:
-                import TTS  # noqa: F401
                 import torch  # noqa: F401
+                import TTS  # noqa: F401
+                from TTS.tts.models.xtts import Xtts  # noqa: F401
 
                 report["checks"].append({"name": "offline_xtts_deps", "ok": True})
             except ImportError as e:
@@ -324,7 +325,11 @@ def main(argv: list[str] | None = None) -> int:
                     {
                         "name": "offline_xtts_deps",
                         "ok": False,
-                        "error": f"{e} — pip install -r engine/requirements-offline.txt",
+                        "error": (
+                            f"{e} — pip uninstall -y TTS coqpit && "
+                            "pip install -r engine/requirements-offline.txt && "
+                            "pip install \"coqui-tts[codec]>=0.27.0\""
+                        ),
                     }
                 )
             xtts_ok = models_manager.is_model_downloaded("xtts-v2")

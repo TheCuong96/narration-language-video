@@ -38,14 +38,111 @@ def _ensure_nllb_deps() -> None:
         ) from e
 
 
+def _patch_xtts_vietnamese_tokenizer() -> None:
+    """viXTTS vocab supports Vietnamese, but coqui-tts tokenizer rejects lang='vi'."""
+    from TTS.tts.layers.xtts import tokenizer as tok_mod
+    from TTS.tts.utils.text.cleaners import collapse_whitespace, lowercase
+
+    cls = tok_mod.VoiceBpeTokenizer
+    if getattr(cls.preprocess_text, "_dubvi_vi_patched", False):
+        return
+
+    original = cls.preprocess_text
+
+    def preprocess_text(self, txt, lang):
+        lang = (lang or "").split("-")[0]
+        if lang == "vi":
+            # Basic Latin-script cleaning; Vietnamese diacritics kept.
+            txt = lowercase(txt)
+            txt = collapse_whitespace(txt)
+            return txt
+        return original(self, txt, lang)
+
+    preprocess_text._dubvi_vi_patched = True  # type: ignore[attr-defined]
+    cls.preprocess_text = preprocess_text
+    # Ensure length warnings work for vi
+    _orig_init = cls.__init__
+
+    def __init__(self, vocab_file=None):
+        _orig_init(self, vocab_file=vocab_file)
+        if "vi" not in self.char_limits:
+            self.char_limits["vi"] = 250
+
+    cls.__init__ = __init__
+
+
+def _patch_xtts_audio_loader() -> None:
+    """
+    Newer torchaudio routes through torchcodec and needs FFmpeg DLLs on PATH.
+    Patch Coqui's load_audio to use soundfile so speaker WAVs load reliably on Windows.
+    """
+    import numpy as np
+    import soundfile as sf
+    import torch
+    import TTS.tts.models.xtts as xtts_mod
+
+    if getattr(xtts_mod.load_audio, "_dubvi_patched", False):
+        return
+
+    def load_audio(audiopath, sampling_rate):
+        data, lsr = sf.read(audiopath, always_2d=False)
+        audio = np.asarray(data, dtype=np.float32)
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        tensor = torch.from_numpy(audio).float().unsqueeze(0)  # [1, T]
+        if int(lsr) != int(sampling_rate) and tensor.shape[-1] > 1:
+            tensor = torch.nn.functional.interpolate(
+                tensor.unsqueeze(0),
+                size=max(1, int(round(tensor.shape[-1] * sampling_rate / lsr))),
+                mode="linear",
+                align_corners=False,
+            ).squeeze(0)
+        tensor = tensor.clamp_(-1, 1)
+        return tensor
+
+    load_audio._dubvi_patched = True  # type: ignore[attr-defined]
+    xtts_mod.load_audio = load_audio
+
+
+def _ensure_ffmpeg_on_path() -> None:
+    """Help torchcodec/torchaudio find FFmpeg if still used elsewhere."""
+    try:
+        from ..ffmpeg import ffmpeg_path
+
+        ff = Path(ffmpeg_path()).resolve().parent
+        path = os.environ.get("PATH", "")
+        if str(ff) not in path.split(os.pathsep):
+            os.environ["PATH"] = str(ff) + os.pathsep + path
+        if hasattr(os, "add_dll_directory"):
+            try:
+                os.add_dll_directory(str(ff))
+            except OSError:
+                pass
+    except Exception as e:
+        log.debug("Could not expose ffmpeg on PATH: %s", e)
+
+
 def _ensure_xtts_deps() -> None:
     try:
         import torch  # noqa: F401
         import TTS  # noqa: F401
+        from TTS.tts.configs.xtts_config import XttsConfig  # noqa: F401
+        from TTS.tts.models.xtts import Xtts  # noqa: F401
     except ImportError as e:
+        msg = str(e)
+        hint = (
+            "pip uninstall -y TTS coqpit && "
+            "pip install -r engine/requirements-offline.txt && "
+            "pip install \"coqui-tts[codec]>=0.27.0\""
+        )
+        if "BeamSearchScorer" in msg or "coqpit" in msg.lower() or "torchcodec" in msg.lower():
+            raise EngineError(
+                ErrorCode.TTS_FAILED,
+                f"XTTS deps lỗi: {e}. Sửa bằng: {hint}",
+            ) from e
         raise EngineError(
             ErrorCode.TTS_FAILED,
-            _offline_deps_hint("TTS (Coqui) / torch"),
+            _offline_deps_hint("coqui-tts[codec] / torch") + f" — {hint}",
         ) from e
 
 
@@ -210,6 +307,7 @@ class XttsTtsProvider(TtsProvider):
 
     def _load(self):
         _ensure_xtts_deps()
+        _ensure_ffmpeg_on_path()
         os.environ.setdefault("COQUI_TOS_AGREED", "1")
         model_dir = self._resolve_dir()
         device_info = resolve_device(prefer_gpu=self.prefer_gpu)
@@ -223,6 +321,9 @@ class XttsTtsProvider(TtsProvider):
             import torch
             from TTS.tts.configs.xtts_config import XttsConfig
             from TTS.tts.models.xtts import Xtts
+
+            _patch_xtts_audio_loader()
+            _patch_xtts_vietnamese_tokenizer()
 
             config_path = model_dir / "config.json"
             if not config_path.is_file():

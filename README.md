@@ -74,10 +74,13 @@ npm run build
 ```powershell
 cd engine
 pip install -r requirements-base.txt
+pip uninstall -y TTS coqpit
 pip install -r requirements-offline.txt
 python -m dubvi models-download nllb-200-distilled-600M
 python -m dubvi models-download xtts-v2
 ```
+
+Nếu TTS báo lỗi `BeamSearchScorer` / `coqpit` / `torchcodec`: gỡ `TTS` cũ rồi cài lại `requirements-offline.txt` như trên.
 
 Trong Settings: chọn dịch **NLLB**, TTS **XTTS-v2**, bật Auto GPU nếu có NVIDIA. XTTS dùng license Coqui CPML (không thương mại).
 

@@ -1,16 +1,22 @@
 # Optional local NLLB + XTTS-v2 stack (heavy: torch, transformers, Coqui TTS).
 # Install after requirements-base.txt:
 #   pip install -r requirements-base.txt
+#   pip uninstall -y TTS coqpit
 #   pip install -r requirements-offline.txt
 #
 # NVIDIA GPU (recommended for XTTS): install a matching torch CUDA wheel first,
 # then the rest of this file.
+#
+# IMPORTANT: original package `TTS==0.22` breaks with modern transformers.
+# Use the maintained fork `coqui-tts` (+ codec extra for torchcodec).
 
 torch>=2.1.0
-transformers>=4.38.0
+# Keep transformers on 4.x for broad Coqui/XTTS compatibility; NLLB works here too.
+transformers>=4.40.0,<5.0.0
 sentencepiece>=0.1.99
 protobuf>=4.25.0
-huggingface_hub>=0.20.0
-TTS>=0.22.0
+huggingface_hub>=0.20.0,<1.0
+coqpit-config>=0.2.0
+coqui-tts[codec]>=0.27.0
 soundfile>=0.12.1
 numpy>=1.24.0
