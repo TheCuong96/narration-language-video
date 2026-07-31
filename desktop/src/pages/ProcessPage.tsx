@@ -1,5 +1,5 @@
 import { useMemo, type DragEvent, type MouseEvent } from "react";
-import type { AudioMode, QueueItem } from "../lib/types";
+import type { AudioMode, QueueItem, XttsSpeakerOption } from "../lib/types";
 import { formatElapsed, useElapsed } from "../hooks/useElapsed";
 import { computeProgressEta } from "../lib/progressEta";
 
@@ -53,6 +53,9 @@ interface Props {
   review: boolean;
   force: boolean;
   preferGpu: boolean;
+  ttsProvider: string;
+  xttsSpeakers: XttsSpeakerOption[];
+  xttsSpeakerWav: string;
   busy: boolean;
   canResume: boolean;
   stageLabel: string;
@@ -80,6 +83,7 @@ interface Props {
   onPickOut: () => void;
   onChangeOutput: (v: string) => void;
   onVoice: (v: string) => void;
+  onXttsSpeaker: (path: string) => void;
   onModel: (v: string) => void;
   onAudioMode: (v: AudioMode) => void;
   onMixDb: (v: number) => void;
@@ -106,6 +110,9 @@ export function ProcessPage(props: Props) {
     review,
     force,
     preferGpu,
+    ttsProvider,
+    xttsSpeakers,
+    xttsSpeakerWav,
     busy,
     canResume,
     stageLabel,
@@ -121,6 +128,7 @@ export function ProcessPage(props: Props) {
     onPickOut,
     onChangeOutput,
     onVoice,
+    onXttsSpeaker,
     onModel,
     onAudioMode,
     onMixDb,
@@ -215,14 +223,46 @@ export function ProcessPage(props: Props) {
           </div>
           <div className="row">
             <label>Giọng</label>
-            <select value={voice} onChange={(e) => onVoice(e.target.value)}>
-              {VOICES.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.label}
-                </option>
-              ))}
-            </select>
+            {ttsProvider === "xtts-v2" ? (
+              <select
+                value={
+                  xttsSpeakers.some((s) => s.path === xttsSpeakerWav)
+                    ? xttsSpeakerWav
+                    : xttsSpeakers.find((s) => s.default)?.path ||
+                      xttsSpeakers[0]?.path ||
+                      ""
+                }
+                onChange={(e) => onXttsSpeaker(e.target.value)}
+                disabled={!xttsSpeakers.length}
+              >
+                {!xttsSpeakers.length ? (
+                  <option value="">
+                    Chưa có mẫu — tải XTTS trong Settings
+                  </option>
+                ) : (
+                  xttsSpeakers.map((s) => (
+                    <option key={s.path} value={s.path}>
+                      {s.label}
+                    </option>
+                  ))
+                )}
+              </select>
+            ) : (
+              <select value={voice} onChange={(e) => onVoice(e.target.value)}>
+                {VOICES.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.label}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
+          {ttsProvider === "xtts-v2" ? (
+            <p className="muted" style={{ marginTop: "-0.35rem" }}>
+              Đang dùng TTS offline (XTTS). Giọng Edge (Hoài My…) chỉ hiện khi chọn
+              edge-tts trong Settings.
+            </p>
+          ) : null}
           <div className="row">
             <label>Whisper</label>
             <select value={model} onChange={(e) => onModel(e.target.value)}>

@@ -7,6 +7,7 @@ import type {
   QueueState,
   SegmentRow,
   WhisperModelInfo,
+  XttsSpeakerOption,
 } from "./types";
 
 export type EventHandler = (ev: EngineEvent) => void;
@@ -41,6 +42,14 @@ export async function pickVideos(): Promise<string[]> {
 
 export async function pickOutputDir(): Promise<string | null> {
   return invoke<string | null>("pick_output_dir");
+}
+
+export async function pickSpeakerWav(): Promise<string | null> {
+  return invoke<string | null>("pick_speaker_wav");
+}
+
+export async function listXttsSpeakers(): Promise<XttsSpeakerOption[]> {
+  return invoke<XttsSpeakerOption[]>("list_xtts_speakers");
 }
 
 export async function openFolder(path: string): Promise<void> {

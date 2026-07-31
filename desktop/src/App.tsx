@@ -10,8 +10,10 @@ import {
   getQueue,
   getSettings,
   listModels,
+  listXttsSpeakers,
   openFolder,
   pickOutputDir,
+  pickSpeakerWav,
   pickVideos,
   probeVideos,
   resumeJob,
@@ -31,6 +33,7 @@ import type {
   QueueItem,
   SegmentRow,
   WhisperModelInfo,
+  XttsSpeakerOption,
 } from "./lib/types";
 import { useElapsed } from "./hooks/useElapsed";
 import { ProcessPage } from "./pages/ProcessPage";
@@ -114,9 +117,25 @@ export default function App() {
   const [errTech, setErrTech] = useState("");
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [models, setModels] = useState<WhisperModelInfo[]>([]);
+  const [xttsSpeakers, setXttsSpeakers] = useState<XttsSpeakerOption[]>([]);
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [downloadPct, setDownloadPct] = useState(0);
+
+  const refreshXttsSpeakers = useCallback(async () => {
+    try {
+      const speakers = await listXttsSpeakers();
+      setXttsSpeakers(speakers);
+      setSettings((s) => {
+        if (s.xtts_speaker_wav || !speakers.length) return s;
+        const preferred =
+          speakers.find((x) => x.default)?.path || speakers[0]?.path || "";
+        return preferred ? { ...s, xtts_speaker_wav: preferred } : s;
+      });
+    } catch {
+      setXttsSpeakers([]);
+    }
+  }, []);
   /** Avoid duplicate dialogs when engine emits error then exits. */
   const sawTerminalRef = useRef(false);
   /** User pressed Stop — don't treat taskkill exit as a crash dialog. */
@@ -280,6 +299,11 @@ export default function App() {
       }
       try {
         setModels(await listModels());
+      } catch {
+        /* ignore */
+      }
+      try {
+        setXttsSpeakers(await listXttsSpeakers());
       } catch {
         /* ignore */
       }
@@ -580,6 +604,9 @@ export default function App() {
           review={review}
           force={force}
           preferGpu={preferGpu}
+          ttsProvider={settings.tts_provider || "edge-tts"}
+          xttsSpeakers={xttsSpeakers}
+          xttsSpeakerWav={settings.xtts_speaker_wav || ""}
           busy={busy}
           canResume={canResume}
           stageLabel={stageLabel}
@@ -598,6 +625,9 @@ export default function App() {
           onPickOut={onPickOut}
           onChangeOutput={setOutputDir}
           onVoice={setVoice}
+          onXttsSpeaker={(path) =>
+            setSettings((s) => ({ ...s, xtts_speaker_wav: path }))
+          }
           onModel={setModel}
           onAudioMode={setAudioMode}
           onMixDb={setMixDb}
@@ -630,6 +660,7 @@ export default function App() {
           doctor={doctorReport}
           downloading={downloading}
           downloadPct={downloadPct}
+          xttsSpeakers={xttsSpeakers}
           onChange={setSettings}
           onSave={async () => {
             try {
@@ -659,6 +690,7 @@ export default function App() {
             try {
               await downloadModel(id, onEngineEvent);
               setModels(await listModels());
+              if (id === "xtts-v2") await refreshXttsSpeakers();
             } catch (e) {
               setErrFriendly({ title: "Tải model thất bại", body: String(e) });
               setErrTech(String(e));
@@ -671,6 +703,10 @@ export default function App() {
             try {
               await deleteModel(id);
               setModels(await listModels());
+              if (id === "xtts-v2") {
+                setXttsSpeakers([]);
+                setSettings((s) => ({ ...s, xtts_speaker_wav: "" }));
+              }
             } catch (e) {
               pushLog({ text: String(e), cls: "error" });
             }
@@ -678,8 +714,23 @@ export default function App() {
           onRefreshModels={async () => {
             try {
               setModels(await listModels());
+              await refreshXttsSpeakers();
             } catch (e) {
               pushLog({ text: String(e), cls: "warn" });
+            }
+          }}
+          onRefreshSpeakers={() => {
+            void refreshXttsSpeakers();
+          }}
+          onPickSpeakerWav={async () => {
+            try {
+              const path = await pickSpeakerWav();
+              if (path) {
+                setSettings((s) => ({ ...s, xtts_speaker_wav: path }));
+                pushLog({ text: `Đã chọn speaker: ${path}` });
+              }
+            } catch (e) {
+              pushLog({ text: String(e), cls: "error" });
             }
           }}
         />

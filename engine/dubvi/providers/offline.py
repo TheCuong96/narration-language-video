@@ -76,8 +76,10 @@ class NllbTranslateProvider(TranslateProvider):
         if not models_manager.is_model_downloaded(self.model_id):
             raise EngineError(
                 ErrorCode.TRANSLATE_FAILED,
-                f"Chưa tải model NLLB '{self.model_id}'. "
-                f"Vào Settings → tải model, hoặc: python -m dubvi models-download {self.model_id}",
+                f"Model NLLB '{self.model_id}' chưa tải đủ (thiếu pytorch_model.bin / "
+                f"model.safetensors). Vào Settings → Xóa rồi Tải lại, hoặc:\n"
+                f"  python -m dubvi models-delete {self.model_id} --yes\n"
+                f"  python -m dubvi models-download {self.model_id}",
             )
         return path
 

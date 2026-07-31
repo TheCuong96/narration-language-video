@@ -99,12 +99,47 @@ def model_path(model_id: str) -> Path:
     return models_dir() / model_id
 
 
+def _has_any(root: Path, names: tuple[str, ...]) -> bool:
+    for name in names:
+        candidate = root / name
+        if candidate.is_file() and candidate.stat().st_size > 1_000_000:
+            return True
+    # Also accept nested single-level folders (rare HF layouts)
+    if root.is_dir():
+        for child in root.iterdir():
+            if not child.is_dir() or child.name.startswith("."):
+                continue
+            for name in names:
+                candidate = child / name
+                if candidate.is_file() and candidate.stat().st_size > 1_000_000:
+                    return True
+    return False
+
+
 def is_model_downloaded(model_id: str) -> bool:
+    """True only when required weight files exist (not just tokenizer/config)."""
     p = model_path(model_id)
     if not p.exists():
         return False
-    # faster-whisper stores a folder with model.bin / config
-    return any(p.iterdir()) if p.is_dir() else p.is_file()
+    meta = catalog_entry(model_id) or {}
+    kind = meta.get("kind", "whisper")
+    if kind == "translate":
+        return _has_any(p, ("pytorch_model.bin", "model.safetensors", "model.bin"))
+    if kind == "tts":
+        return _has_any(p, ("model.pth", "model.safetensors")) and (p / "config.json").is_file()
+    # Whisper / faster-whisper: model.bin or similar
+    if p.is_file():
+        return True
+    if not p.is_dir():
+        return False
+    weight_names = ("model.bin", "model.safetensors", "pytorch_model.bin")
+    if _has_any(p, weight_names):
+        return True
+    # Some CT2 layouts use nested dirs with model.bin
+    for f in p.rglob("model.bin"):
+        if f.is_file() and f.stat().st_size > 1_000_000:
+            return True
+    return False
 
 
 def model_disk_usage_bytes(model_id: str | None = None) -> int:
@@ -323,11 +358,24 @@ def download_model(
                     ErrorCode.INVALID_ARGS,
                     f"Model {model_id} thiếu hf_repo trong catalog",
                 )
+            # Clear stale incomplete weight locks from a previous interrupted download
+            for lock in dest.rglob("*.lock"):
+                try:
+                    lock.unlink()
+                except OSError:
+                    pass
             _download_hf_snapshot(
                 model_id, hf_repo=hf_repo, dest=dest, progress_cb=progress_cb
             )
             if kind == "tts" and model_id == "xtts-v2":
                 _ensure_xtts_speaker(dest)
+            if not is_model_downloaded(model_id):
+                raise EngineError(
+                    ErrorCode.WHISPER_LOAD_FAILED,
+                    f"Tải '{model_id}' chưa đủ file trọng số (có thể bị ngắt giữa chừng). "
+                    f"Xóa model rồi tải lại: python -m dubvi models-delete {model_id} --yes "
+                    f"&& python -m dubvi models-download {model_id}",
+                )
             _write_marker(
                 dest,
                 model_id,
@@ -341,6 +389,12 @@ def download_model(
             ErrorCode.WHISPER_LOAD_FAILED,
             f"Tải model thất bại (có thể thử lại): {e}",
         ) from e
+
+    if kind != "whisper" and not is_model_downloaded(model_id):
+        raise EngineError(
+            ErrorCode.WHISPER_LOAD_FAILED,
+            f"Model '{model_id}' thiếu file trọng số sau khi tải. Hãy xóa và tải lại.",
+        )
 
     events.progress("downloading_model", 100, 100, f"Xong {model_id}")
     events.log(f"Đã tải model {model_id} trong {time.time() - t0:.0f}s → {dest}")
@@ -365,3 +419,70 @@ def delete_model(model_id: str, *, confirm: bool = False) -> None:
 
 def whisper_download_root() -> str:
     return str(models_dir())
+
+
+# Friendly labels for bundled viXTTS sample voices
+_XTTS_SPEAKER_LABELS: dict[str, str] = {
+    "speaker_default.wav": "Mặc định (đã chọn tự động)",
+    "vi_sample.wav": "Mẫu tiếng Việt (vi_sample)",
+    "nu-nhe-nhang.wav": "Nữ — nhẹ nhàng",
+    "nu-calm.wav": "Nữ — điềm tĩnh",
+    "nu-cham.wav": "Nữ — chậm",
+    "nu-luu-loat.wav": "Nữ — lưu loát",
+    "nu-nhan-nha.wav": "Nữ — nhàn nhã",
+    "nam-calm.wav": "Nam — điềm tĩnh",
+    "nam-cham.wav": "Nam — chậm",
+    "nam-nhanh.wav": "Nam — nhanh",
+    "nam-truyen-cam.wav": "Nam — truyền cảm",
+}
+
+
+def list_xtts_speakers(model_id: str = "xtts-v2") -> list[dict[str, Any]]:
+    """
+    List reference WAV speakers available under the downloaded XTTS model folder.
+    These come with viXTTS (samples/*.wav). Empty list if model not downloaded.
+    """
+    root = model_path(model_id)
+    if not root.is_dir():
+        return []
+
+    found: list[Path] = []
+    for pattern in ("*.wav", "samples/*.wav"):
+        found.extend(sorted(root.glob(pattern)))
+
+    # De-dupe by resolved path, prefer shorter relative names first
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for wav in found:
+        if not wav.is_file() or wav.stat().st_size < 1000:
+            continue
+        key = str(wav.resolve()).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        name = wav.name
+        rel = str(wav.relative_to(root)).replace("\\", "/")
+        label = _XTTS_SPEAKER_LABELS.get(name, name.replace(".wav", "").replace("-", " "))
+        out.append(
+            {
+                "id": rel,
+                "label": label,
+                "path": str(wav),
+                "name": name,
+                "default": name == "speaker_default.wav",
+            }
+        )
+
+    # Put default first, then nữ, then nam, then others
+    def sort_key(item: dict[str, Any]) -> tuple:
+        name = str(item["name"]).lower()
+        if item.get("default"):
+            return (0, name)
+        if name.startswith("nu") or "nu-" in name:
+            return (1, name)
+        if name.startswith("nam") or "nam-" in name:
+            return (2, name)
+        return (3, name)
+
+    out.sort(key=sort_key)
+    return out

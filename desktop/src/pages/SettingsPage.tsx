@@ -1,4 +1,9 @@
-import type { AppSettings, DoctorReport, WhisperModelInfo } from "../lib/types";
+import type {
+  AppSettings,
+  DoctorReport,
+  WhisperModelInfo,
+  XttsSpeakerOption,
+} from "../lib/types";
 import { PrivacyBanner } from "../components/PrivacyBanner";
 
 interface Props {
@@ -7,12 +12,15 @@ interface Props {
   doctor: DoctorReport | null;
   downloading: string | null;
   downloadPct: number;
+  xttsSpeakers: XttsSpeakerOption[];
   onChange: (s: AppSettings) => void;
   onSave: () => void;
   onDoctor: () => void;
   onDownload: (id: string) => void;
   onDelete: (id: string) => void;
   onRefreshModels: () => void;
+  onPickSpeakerWav: () => void;
+  onRefreshSpeakers: () => void;
 }
 
 function ModelList({
@@ -111,18 +119,31 @@ export function SettingsPage({
   doctor,
   downloading,
   downloadPct,
+  xttsSpeakers,
   onChange,
   onSave,
   onDoctor,
   onDownload,
   onDelete,
   onRefreshModels,
+  onPickSpeakerWav,
+  onRefreshSpeakers,
 }: Props) {
   const whisperModels = models.filter((m) => (m.kind || "whisper") === "whisper");
   const translateModels = models.filter((m) => m.kind === "translate");
   const ttsModels = models.filter((m) => m.kind === "tts");
   const offlineTranslate = settings.translate_provider === "nllb";
   const offlineTts = settings.tts_provider === "xtts-v2";
+
+  const selectedSpeaker = settings.xtts_speaker_wav || "";
+  const matchedSpeaker = xttsSpeakers.find(
+    (s) => s.path === selectedSpeaker || s.id === selectedSpeaker,
+  );
+  const selectValue = matchedSpeaker
+    ? matchedSpeaker.path
+    : selectedSpeaker
+      ? "__custom__"
+      : xttsSpeakers.find((s) => s.default)?.path || xttsSpeakers[0]?.path || "";
 
   return (
     <div className="settings-stack">
@@ -251,22 +272,62 @@ export function SettingsPage({
           </select>
         </div>
         {offlineTts && (
-          <div className="row">
-            <label>Speaker WAV (XTTS)</label>
-            <input
-              placeholder="%LOCALAPPDATA%\DubVI\models\xtts-v2\speaker_default.wav"
-              value={settings.xtts_speaker_wav || ""}
-              onChange={(e) =>
-                onChange({ ...settings, xtts_speaker_wav: e.target.value })
-              }
-            />
-          </div>
+          <>
+            <div className="row">
+              <label>Giọng mẫu (Speaker)</label>
+              <select
+                value={selectValue}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === "__custom__") {
+                    onPickSpeakerWav();
+                    return;
+                  }
+                  onChange({ ...settings, xtts_speaker_wav: v });
+                }}
+                disabled={!xttsSpeakers.length && !selectedSpeaker}
+              >
+                {!xttsSpeakers.length && (
+                  <option value="">
+                    Chưa có mẫu — hãy tải model XTTS-v2 bên dưới
+                  </option>
+                )}
+                {xttsSpeakers.map((s) => (
+                  <option key={s.path} value={s.path}>
+                    {s.label}
+                  </option>
+                ))}
+                <option value="__custom__">Chọn file WAV của tôi…</option>
+              </select>
+            </div>
+            <p className="muted">
+              Đây là <strong>file giọng mẫu 3–10 giây</strong> để XTTS bắt chước
+              giọng. Các lựa chọn trên lấy từ model viXTTS đã tải (thư mục{" "}
+              <code>%LOCALAPPDATA%\DubVI\models\xtts-v2\samples</code>). Để trống /
+              chọn mặc định cũng được — app dùng{" "}
+              <code>speaker_default.wav</code>.
+            </p>
+            {selectedSpeaker && !matchedSpeaker ? (
+              <div className="row">
+                <label>File tùy chọn</label>
+                <input value={selectedSpeaker} readOnly />
+              </div>
+            ) : null}
+            <div className="actions">
+              <button type="button" onClick={onRefreshSpeakers}>
+                Làm mới danh sách giọng
+              </button>
+              <button type="button" onClick={onPickSpeakerWav}>
+                Chọn WAV tùy chỉnh…
+              </button>
+            </div>
+          </>
         )}
         {(offlineTranslate || offlineTts) && (
           <p className="muted">
             {offlineTranslate ? "Đã chọn NLLB — tải model dịch bên dưới. " : null}
             {offlineTts
-              ? "Đã chọn XTTS — tải model TTS và (tuỳ chọn) đặt file WAV giọng mẫu ~3–10s."
+              ? "Đã chọn XTTS — tải model TTS bên dưới rồi chọn giọng mẫu ở dropdown."
               : null}
           </p>
         )}

@@ -150,8 +150,14 @@ def _build_parser() -> argparse.ArgumentParser:
     voices_p = sub.add_parser("list-voices", help="List Vietnamese edge-tts voices")
     voices_p.add_argument("--json", action="store_true", dest="as_json")
 
+    xtts_sp = sub.add_parser(
+        "list-xtts-speakers",
+        help="List bundled XTTS reference WAV speakers (after model download)",
+    )
+    xtts_sp.add_argument("--model-id", default="xtts-v2")
+
     privacy = sub.add_parser("privacy-notice", help="Print privacy notice JSON")
-    _ = (models_p, privacy, doctor)
+    _ = (models_p, privacy, doctor, xtts_sp)
 
     return p
 
@@ -424,6 +430,13 @@ def main(argv: list[str] | None = None) -> int:
                     f"{v.get('ShortName', ''):28} {v.get('Gender', ''):8} "
                     f"{v.get('FriendlyName', '')}"
                 )
+        return 0
+
+    if args.command == "list-xtts-speakers":
+        from . import models_manager
+
+        speakers = models_manager.list_xtts_speakers(args.model_id)
+        print(json.dumps(speakers, ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "queue":

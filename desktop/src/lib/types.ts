@@ -101,6 +101,14 @@ export interface WhisperModelInfo {
   license_note?: string;
 }
 
+export interface XttsSpeakerOption {
+  id: string;
+  label: string;
+  path: string;
+  name: string;
+  default?: boolean;
+}
+
 export interface AppSettings {
   whisper_model: string;
   device_mode: DeviceMode;
