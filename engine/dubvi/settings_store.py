@@ -23,6 +23,8 @@ class AppSettings:
     review_by_default: bool = False
     translate_provider: str = "deep-translator"
     tts_provider: str = "edge-tts"
+    # Local XTTS speaker reference (WAV). Empty → model speaker_default.wav
+    xtts_speaker_wav: str = ""
     # Never store API keys in plaintext logs; reserved for future
     # api_keys stored only if user opts in later versions
 

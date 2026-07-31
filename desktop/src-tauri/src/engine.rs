@@ -25,6 +25,20 @@ pub struct JobOptions {
     pub review: bool,
     pub force: bool,
     pub prefer_gpu: bool,
+    #[serde(default = "default_translate_provider")]
+    pub translate_provider: String,
+    #[serde(default = "default_tts_provider")]
+    pub tts_provider: String,
+    #[serde(default)]
+    pub xtts_speaker_wav: String,
+}
+
+fn default_translate_provider() -> String {
+    "deep-translator".into()
+}
+
+fn default_tts_provider() -> String {
+    "edge-tts".into()
 }
 
 fn repo_engine_dir() -> PathBuf {
@@ -254,6 +268,18 @@ pub async fn start_job(
         args.push("--gpu".into());
     } else {
         args.push("--cpu".into());
+    }
+    if !options.translate_provider.is_empty() {
+        args.push("--translate-provider".into());
+        args.push(options.translate_provider);
+    }
+    if !options.tts_provider.is_empty() {
+        args.push("--tts-provider".into());
+        args.push(options.tts_provider);
+    }
+    if !options.xtts_speaker_wav.is_empty() {
+        args.push("--xtts-speaker".into());
+        args.push(options.xtts_speaker_wav);
     }
 
     {

@@ -1,5 +1,5 @@
 import { useMemo, type DragEvent, type MouseEvent } from "react";
-import type { AudioMode, QueueItem } from "../lib/types";
+import type { AudioMode, QueueItem, XttsSpeakerOption } from "../lib/types";
 import { formatElapsed, useElapsed } from "../hooks/useElapsed";
 import { computeProgressEta } from "../lib/progressEta";
 
@@ -53,6 +53,9 @@ interface Props {
   review: boolean;
   force: boolean;
   preferGpu: boolean;
+  ttsProvider: string;
+  xttsSpeakers: XttsSpeakerOption[];
+  xttsSpeakerWav: string;
   busy: boolean;
   canResume: boolean;
   stageLabel: string;
@@ -80,6 +83,7 @@ interface Props {
   onPickOut: () => void;
   onChangeOutput: (v: string) => void;
   onVoice: (v: string) => void;
+  onXttsSpeaker: (path: string) => void;
   onModel: (v: string) => void;
   onAudioMode: (v: AudioMode) => void;
   onMixDb: (v: number) => void;
@@ -106,6 +110,9 @@ export function ProcessPage(props: Props) {
     review,
     force,
     preferGpu,
+    ttsProvider,
+    xttsSpeakers,
+    xttsSpeakerWav,
     busy,
     canResume,
     stageLabel,
@@ -121,6 +128,7 @@ export function ProcessPage(props: Props) {
     onPickOut,
     onChangeOutput,
     onVoice,
+    onXttsSpeaker,
     onModel,
     onAudioMode,
     onMixDb,
@@ -149,6 +157,10 @@ export function ProcessPage(props: Props) {
   const filePct = Math.max(0, Math.min(100, Math.round(fileProgress.percent || 0)));
   const stageKey = fileProgress.stage || "";
   const fileIndex = overallProgress.fileIndex || 0;
+  const settingsLocked = busy;
+  const hasCompletedResult =
+    !busy &&
+    (overallPct >= 100 || queue.some((q) => q.status === "completed"));
 
   const stageElapsedSec = useElapsed(busy && !!stageKey, stageKey);
   const fileElapsedSec = useElapsed(busy && fileIndex > 0, String(fileIndex));
@@ -186,46 +198,96 @@ export function ProcessPage(props: Props) {
   return (
     <>
       <div
-        className={`dropzone ${dragOver ? "active" : ""}`}
-        onDragOver={onDragOver}
-        onDragLeave={onDragLeave}
-        onDrop={onDrop}
-        onClick={onPickFiles}
+        className={`dropzone ${dragOver && !settingsLocked ? "active" : ""} ${settingsLocked ? "locked" : ""}`}
+        onDragOver={settingsLocked ? undefined : onDragOver}
+        onDragLeave={settingsLocked ? undefined : onDragLeave}
+        onDrop={settingsLocked ? undefined : onDrop}
+        onClick={settingsLocked ? undefined : onPickFiles}
         role="button"
-        tabIndex={0}
+        tabIndex={settingsLocked ? -1 : 0}
+        aria-disabled={settingsLocked}
       >
         <strong>Kéo và thả video vào đây</strong>
         <span>MP4 · MKV · MOV · AVI · WebM — hoặc bấm chọn một / nhiều file</span>
         <div className="drop-path">{fileLabel}</div>
+        {settingsLocked ? (
+          <div className="drop-locked">Đang xử lý — không đổi video / thiết lập</div>
+        ) : null}
       </div>
 
       <div className="grid">
-        <section className="panel">
+        <section className={`panel ${settingsLocked ? "settings-locked" : ""}`}>
           <h2>Thiết lập</h2>
+          {settingsLocked ? (
+            <p className="settings-lock-note">
+              Đang xử lý — mọi thiết lập bị khóa đến khi xong hoặc tạm dừng.
+            </p>
+          ) : null}
           <div className="row">
             <label>Thư mục ra</label>
             <input
               value={outputDir}
               onChange={(e) => onChangeOutput(e.target.value)}
               placeholder="D:\\videos\\vi"
+              disabled={settingsLocked}
             />
-            <button type="button" onClick={onPickOut}>
+            <button type="button" onClick={onPickOut} disabled={settingsLocked}>
               Chọn
             </button>
           </div>
           <div className="row">
             <label>Giọng</label>
-            <select value={voice} onChange={(e) => onVoice(e.target.value)}>
-              {VOICES.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.label}
-                </option>
-              ))}
-            </select>
+            {ttsProvider === "xtts-v2" ? (
+              <select
+                value={
+                  xttsSpeakers.some((s) => s.path === xttsSpeakerWav)
+                    ? xttsSpeakerWav
+                    : xttsSpeakers.find((s) => s.default)?.path ||
+                      xttsSpeakers[0]?.path ||
+                      ""
+                }
+                onChange={(e) => onXttsSpeaker(e.target.value)}
+                disabled={settingsLocked || !xttsSpeakers.length}
+              >
+                {!xttsSpeakers.length ? (
+                  <option value="">
+                    Chưa có mẫu — tải model giọng đọc trong Settings
+                  </option>
+                ) : (
+                  xttsSpeakers.map((s) => (
+                    <option key={s.path} value={s.path}>
+                      {s.label}
+                    </option>
+                  ))
+                )}
+              </select>
+            ) : (
+              <select
+                value={voice}
+                onChange={(e) => onVoice(e.target.value)}
+                disabled={settingsLocked}
+              >
+                {VOICES.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.label}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
+          {ttsProvider === "xtts-v2" ? (
+            <p className="muted" style={{ marginTop: "-0.35rem" }}>
+              Đang tạo giọng đọc offline trên máy. Giọng Edge (Hoài My…) chỉ hiện khi
+              chọn Microsoft Edge trong Settings.
+            </p>
+          ) : null}
           <div className="row">
-            <label>Whisper</label>
-            <select value={model} onChange={(e) => onModel(e.target.value)}>
+            <label>Nhận dạng lời nói</label>
+            <select
+              value={model}
+              onChange={(e) => onModel(e.target.value)}
+              disabled={settingsLocked}
+            >
               {MODELS.map((m) => (
                 <option key={m} value={m}>
                   {m}
@@ -238,6 +300,7 @@ export function ProcessPage(props: Props) {
             <select
               value={audioMode}
               onChange={(e) => onAudioMode(e.target.value as AudioMode)}
+              disabled={settingsLocked}
             >
               <option value="vi_only">Chỉ giọng Việt</option>
               <option value="dual_track">Hai track (EN + VI)</option>
@@ -251,6 +314,7 @@ export function ProcessPage(props: Props) {
                 type="number"
                 value={mixDb}
                 onChange={(e) => onMixDb(Number(e.target.value))}
+                disabled={settingsLocked}
               />
             </div>
           )}
@@ -260,15 +324,17 @@ export function ProcessPage(props: Props) {
                 type="checkbox"
                 checked={review}
                 onChange={(e) => onReview(e.target.checked)}
+                disabled={settingsLocked}
               />{" "}
-              Sửa bản dịch trước TTS
-              <CheckHelp tip="Chọn khi muốn dừng lại xem/sửa bản dịch Việt trước khi tạo giọng. Video mới thường để trống." />
+              Sửa bản dịch trước khi tạo giọng
+              <CheckHelp tip="Chọn khi muốn dừng lại xem/sửa bản dịch Việt trước khi tạo giọng đọc. Video mới thường để trống." />
             </label>
             <label>
               <input
                 type="checkbox"
                 checked={force}
                 onChange={(e) => onForce(e.target.checked)}
+                disabled={settingsLocked}
               />{" "}
               Làm lại
               <CheckHelp tip="Chọn khi muốn xử lý lại file đã chạy trước đó (bỏ kết quả cũ). Lần đầu xử lý thì không cần." />
@@ -278,6 +344,7 @@ export function ProcessPage(props: Props) {
                 type="checkbox"
                 checked={preferGpu}
                 onChange={(e) => onGpu(e.target.checked)}
+                disabled={settingsLocked}
               />{" "}
               Auto GPU
               <CheckHelp tip="Chọn nếu máy có card Nvidia và muốn nhận dạng giọng nhanh hơn. Không có Nvidia hoặc lỗi thì app tự dùng CPU." />
@@ -301,7 +368,14 @@ export function ProcessPage(props: Props) {
             <button type="button" disabled={busy} onClick={onRetry}>
               Thử lại lỗi
             </button>
-            <button type="button" disabled={!outputDir} onClick={onOpenOut}>
+            <button
+              type="button"
+              className={
+                hasCompletedResult ? "btn-open-result is-ready" : "btn-open-result"
+              }
+              disabled={!outputDir || busy}
+              onClick={onOpenOut}
+            >
               Mở kết quả
             </button>
           </div>
@@ -324,55 +398,82 @@ export function ProcessPage(props: Props) {
           )}
 
           {(eta.stage || eta.file || eta.job) && (
-            <div className="eta-box" aria-live="polite">
-              {eta.stage && (
-                <div className="eta-row">
-                  <span className="eta-k">Công đoạn</span>
-                  <span>
-                    còn <strong>{eta.stage.remainLabel}</strong>
-                    <span className="eta-clock"> · xong ~{eta.stage.finishLabel}</span>
-                  </span>
-                </div>
-              )}
-              {eta.file && (
-                <div className="eta-row">
-                  <span className="eta-k">Video này</span>
-                  <span>
-                    còn <strong>{eta.file.remainLabel}</strong>
-                    <span className="eta-clock"> · xong ~{eta.file.finishLabel}</span>
-                  </span>
-                </div>
-              )}
+            <div className={`eta-box eta-${eta.confidence}`} aria-live="polite">
+              <div className="eta-title">Ước lượng thời gian</div>
               {eta.job && (
-                <div className="eta-row eta-row-total">
-                  <span className="eta-k">
-                    {totalFiles > 1 ? `Tất cả ${totalFiles} video` : "Tổng"}
-                  </span>
-                  <span>
-                    còn <strong>{eta.job.remainLabel}</strong>
-                    <span className="eta-clock"> · xong ~{eta.job.finishLabel}</span>
-                  </span>
+                <div className="eta-headline">
+                  <div className="eta-finish">
+                    Dự kiến xong lúc <strong>{eta.job.finishLabel}</strong>
+                  </div>
+                  <div className="eta-remain">
+                    Còn khoảng <strong>{eta.job.remainLabel}</strong>
+                    {totalFiles > 1 ? ` cho ${totalFiles} video` : ""}
+                  </div>
                 </div>
               )}
+              <div className="eta-rows">
+                {eta.stage && (
+                  <div className="eta-row">
+                    <span className="eta-k">{eta.stageName}</span>
+                    <span className="eta-v">
+                      còn <strong>{eta.stage.remainLabel}</strong>
+                      <span className="eta-clock">
+                        {" "}
+                        · xong lúc {eta.stage.finishLabel}
+                      </span>
+                    </span>
+                  </div>
+                )}
+                {eta.file && (
+                  <div className="eta-row">
+                    <span className="eta-k">
+                      Video này
+                      {overallProgress.fileIndex > 0
+                        ? ` (${overallProgress.fileIndex}/${totalFiles || "—"})`
+                        : ""}
+                    </span>
+                    <span className="eta-v">
+                      còn <strong>{eta.file.remainLabel}</strong>
+                      <span className="eta-clock">
+                        {" "}
+                        · xong lúc {eta.file.finishLabel}
+                      </span>
+                    </span>
+                  </div>
+                )}
+                {eta.job && totalFiles > 1 && (
+                  <div className="eta-row eta-row-total">
+                    <span className="eta-k">Cả hàng đợi</span>
+                    <span className="eta-v">
+                      còn <strong>{eta.job.remainLabel}</strong>
+                      <span className="eta-clock">
+                        {" "}
+                        · xong lúc {eta.job.finishLabel}
+                      </span>
+                    </span>
+                  </div>
+                )}
+              </div>
+              {eta.confidenceLabel ? (
+                <div className="eta-note">{eta.confidenceLabel}</div>
+              ) : null}
             </div>
           )}
 
           <label className="bar-label">
-            Tổng toàn job: <strong>{overallPct}%</strong>
-            {eta.job ? ` · còn ~${eta.job.remainLabel}` : ""}
+            Tổng tiến độ: <strong>{overallPct}%</strong>
+            {eta.job ? ` · còn ${eta.job.remainLabel}` : ""}
           </label>
           <div className="bar">
             <i style={{ width: `${overallPct}%` }} />
           </div>
           <label className="bar-label">
-            Công đoạn hiện tại:{" "}
-            <strong>
-              {fileProgress.stageLabel || "—"} · {filePct}%
-            </strong>
+            {fileProgress.stageLabel || eta.stageName || "Công đoạn"}:{" "}
+            <strong>{filePct}%</strong>
             {fileProgress.total > 0
               ? ` (${fileProgress.current}/${fileProgress.total})`
               : ""}
-            {eta.stage ? ` · còn ~${eta.stage.remainLabel}` : ""}
+            {eta.stage ? ` · còn ${eta.stage.remainLabel}` : ""}
           </label>
           <div className="bar thin">
             <i style={{ width: `${filePct}%` }} />
@@ -388,15 +489,9 @@ export function ProcessPage(props: Props) {
                   s.active ? "stage-active" : s.done ? "stage-done" : undefined
                 }
               >
-                {s.label} ~{s.weight}%
-                {s.estLabel ? (
-                  <>
-                    {" "}
-                    ·{" "}
-                    {s.active && eta.stage
-                      ? `còn ~${eta.stage.remainLabel}`
-                      : `~${s.estLabel}`}
-                  </>
+                <span className="stage-legend-name">{s.label}</span>
+                {s.remainLabel ? (
+                  <span className="stage-legend-eta"> · {s.remainLabel}</span>
                 ) : null}
               </li>
             ))}

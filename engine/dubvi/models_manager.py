@@ -1,11 +1,10 @@
-"""Whisper model download / list / delete under %LOCALAPPDATA%/DubVI/models."""
+"""Model download / list / delete under %LOCALAPPDATA%/DubVI/models."""
 
 from __future__ import annotations
 
 import json
 import shutil
 import time
-from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,10 +14,11 @@ from .system_info import EngineError, appdata_root, get_logger
 
 log = get_logger("dubvi.models")
 
-# Approximate download sizes (CTranslate2 faster-whisper conversions)
+# Approximate download sizes (CTranslate2 faster-whisper conversions + offline NLLB/XTTS)
 MODEL_CATALOG: list[dict[str, Any]] = [
     {
         "id": "tiny",
+        "kind": "whisper",
         "label": "Tiny",
         "size_mb": 75,
         "speed": "Rất nhanh",
@@ -27,6 +27,7 @@ MODEL_CATALOG: list[dict[str, Any]] = [
     },
     {
         "id": "base",
+        "kind": "whisper",
         "label": "Base",
         "size_mb": 145,
         "speed": "Nhanh",
@@ -35,6 +36,7 @@ MODEL_CATALOG: list[dict[str, Any]] = [
     },
     {
         "id": "small",
+        "kind": "whisper",
         "label": "Small (đề xuất CPU)",
         "size_mb": 485,
         "speed": "Trung bình",
@@ -44,6 +46,7 @@ MODEL_CATALOG: list[dict[str, Any]] = [
     },
     {
         "id": "medium",
+        "kind": "whisper",
         "label": "Medium",
         "size_mb": 1500,
         "speed": "Chậm trên CPU",
@@ -52,11 +55,36 @@ MODEL_CATALOG: list[dict[str, Any]] = [
     },
     {
         "id": "large-v3",
+        "kind": "whisper",
         "label": "Large v3",
         "size_mb": 3000,
         "speed": "Rất chậm trên CPU",
         "quality": "Cao nhất",
         "recommended_for": "Chỉ khi cần chất lượng tối đa + GPU",
+    },
+    {
+        "id": "nllb-200-distilled-600M",
+        "kind": "translate",
+        "label": "Dịch offline (NLLB-200)",
+        "size_mb": 2400,
+        "speed": "Trung bình (GPU nhanh hơn)",
+        "quality": "Tốt — dịch trên máy",
+        "recommended_for": "Dịch trên máy, không cần Google",
+        "hf_repo": "facebook/nllb-200-distilled-600M",
+        "provider": "nllb",
+    },
+    {
+        "id": "xtts-v2",
+        "kind": "tts",
+        "label": "Tạo giọng đọc offline (XTTS)",
+        "size_mb": 1900,
+        "speed": "Chậm trên CPU — nên dùng GPU",
+        "quality": "Cao — giọng trên máy / bắt chước giọng mẫu",
+        "recommended_for": "Tạo giọng đọc offline chất lượng cao (nên có GPU)",
+        # Vietnamese fine-tune of Coqui XTTS-v2
+        "hf_repo": "capleaf/viXTTS",
+        "provider": "xtts-v2",
+        "license_note": "Coqui CPML — không dùng thương mại",
     },
 ]
 
@@ -71,12 +99,47 @@ def model_path(model_id: str) -> Path:
     return models_dir() / model_id
 
 
+def _has_any(root: Path, names: tuple[str, ...]) -> bool:
+    for name in names:
+        candidate = root / name
+        if candidate.is_file() and candidate.stat().st_size > 1_000_000:
+            return True
+    # Also accept nested single-level folders (rare HF layouts)
+    if root.is_dir():
+        for child in root.iterdir():
+            if not child.is_dir() or child.name.startswith("."):
+                continue
+            for name in names:
+                candidate = child / name
+                if candidate.is_file() and candidate.stat().st_size > 1_000_000:
+                    return True
+    return False
+
+
 def is_model_downloaded(model_id: str) -> bool:
+    """True only when required weight files exist (not just tokenizer/config)."""
     p = model_path(model_id)
     if not p.exists():
         return False
-    # faster-whisper stores a folder with model.bin / config
-    return any(p.iterdir()) if p.is_dir() else p.is_file()
+    meta = catalog_entry(model_id) or {}
+    kind = meta.get("kind", "whisper")
+    if kind == "translate":
+        return _has_any(p, ("pytorch_model.bin", "model.safetensors", "model.bin"))
+    if kind == "tts":
+        return _has_any(p, ("model.pth", "model.safetensors")) and (p / "config.json").is_file()
+    # Whisper / faster-whisper: model.bin or similar
+    if p.is_file():
+        return True
+    if not p.is_dir():
+        return False
+    weight_names = ("model.bin", "model.safetensors", "pytorch_model.bin")
+    if _has_any(p, weight_names):
+        return True
+    # Some CT2 layouts use nested dirs with model.bin
+    for f in p.rglob("model.bin"):
+        if f.is_file() and f.stat().st_size > 1_000_000:
+            return True
+    return False
 
 
 def model_disk_usage_bytes(model_id: str | None = None) -> int:
@@ -92,13 +155,20 @@ def model_disk_usage_bytes(model_id: str | None = None) -> int:
     return total
 
 
-def list_models() -> list[dict[str, Any]]:
+def catalog_entry(model_id: str) -> dict[str, Any] | None:
+    return next((m for m in MODEL_CATALOG if m["id"] == model_id), None)
+
+
+def list_models(*, kind: str | None = None) -> list[dict[str, Any]]:
     out = []
     for m in MODEL_CATALOG:
+        if kind and m.get("kind", "whisper") != kind:
+            continue
         used = model_disk_usage_bytes(m["id"]) if is_model_downloaded(m["id"]) else 0
         out.append(
             {
                 **m,
+                "kind": m.get("kind", "whisper"),
                 "downloaded": is_model_downloaded(m["id"]),
                 "local_bytes": used,
                 "local_mb": round(used / (1024 * 1024), 1) if used else 0,
@@ -111,32 +181,7 @@ def list_models() -> list[dict[str, Any]]:
 ProgressCb = Callable[[int, int, str], None]
 
 
-def download_model(
-    model_id: str,
-    *,
-    progress_cb: ProgressCb | None = None,
-) -> Path:
-    """
-    Download faster-whisper model into LOCALAPPDATA/DubVI/models/<id>.
-    Never silent: emits size estimate and progress events.
-    """
-    meta = next((m for m in MODEL_CATALOG if m["id"] == model_id), None)
-    if meta is None:
-        raise EngineError(ErrorCode.INVALID_ARGS, f"Model không hợp lệ: {model_id}")
-
-    size_mb = int(meta["size_mb"])
-    events.stage(
-        "downloading_model",
-        f"Sẽ tải model '{model_id}' (~{size_mb} MB) vào {models_dir()}",
-    )
-    events.warning(
-        "MODEL_DOWNLOAD_SIZE",
-        f"Model {model_id} khoảng {size_mb} MB. Cần Internet và đủ dung lượng ổ cứng.",
-        model=model_id,
-        size_mb=size_mb,
-    )
-
-    # Disk check
+def _disk_guard(model_id: str, size_mb: int) -> None:
     from .system_info import free_disk_bytes
 
     free = free_disk_bytes(models_dir())
@@ -149,63 +194,207 @@ def download_model(
             f"nhưng ổ đĩa chỉ còn {free // (1024**2)} MB.",
         )
 
-    dest = model_path(model_id)
-    dest.mkdir(parents=True, exist_ok=True)
 
+def _write_marker(dest: Path, model_id: str, size_mb: int, extra: dict[str, Any] | None = None) -> None:
+    payload = {
+        "model_id": model_id,
+        "path": str(dest),
+        "size_mb_estimate": size_mb,
+        "downloaded_at": time.time(),
+    }
+    if extra:
+        payload.update(extra)
+    (dest / "downloaded.json").write_text(
+        json.dumps(payload, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _download_hf_snapshot(
+    model_id: str,
+    *,
+    hf_repo: str,
+    dest: Path,
+    progress_cb: ProgressCb | None = None,
+) -> Path:
     try:
-        from faster_whisper.utils import download_model as fw_download
-    except Exception as e:
+        from huggingface_hub import snapshot_download
+    except ImportError as e:
         raise EngineError(
             ErrorCode.WHISPER_LOAD_FAILED,
-            f"Không import được faster-whisper để tải model: {e}",
+            "Thiếu huggingface_hub. Cài: pip install -r engine/requirements-offline.txt",
         ) from e
 
+    events.progress("downloading_model", 5, 100, f"Đang tải HF {hf_repo}")
+    if progress_cb:
+        progress_cb(5, 100, model_id)
+
+    try:
+        path = snapshot_download(
+            repo_id=hf_repo,
+            local_dir=str(dest),
+            local_dir_use_symlinks=False,
+        )
+    except TypeError:
+        # Newer huggingface_hub removed local_dir_use_symlinks
+        path = snapshot_download(repo_id=hf_repo, local_dir=str(dest))
+    events.progress("downloading_model", 90, 100, f"Đã tải xong snapshot {model_id}")
+    if progress_cb:
+        progress_cb(90, 100, model_id)
+    return Path(path)
+
+
+def _ensure_xtts_speaker(dest: Path) -> None:
+    """Pick a short reference wav used when user has not set xtts_speaker_wav."""
+    speaker = dest / "speaker_default.wav"
+    if speaker.is_file() and speaker.stat().st_size > 1000:
+        return
+
+    # Prefer Vietnamese samples shipped with viXTTS
+    local_candidates = [
+        dest / "vi_sample.wav",
+        dest / "samples" / "nu-nhe-nhang.wav",
+        dest / "samples" / "nu-calm.wav",
+        dest / "samples" / "nam-calm.wav",
+    ]
+    for src in local_candidates:
+        if src.is_file() and src.stat().st_size > 1000:
+            shutil.copy2(src, speaker)
+            events.log(f"Đã chọn speaker mặc định: {src.name}")
+            return
+
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        return
+
+    remote_candidates = [
+        ("capleaf/viXTTS", "vi_sample.wav"),
+        ("capleaf/viXTTS", "samples/nu-nhe-nhang.wav"),
+        ("coqui/XTTS-v2", "samples/en_sample.wav"),
+    ]
+    for repo, file_name in remote_candidates:
+        try:
+            downloaded = hf_hub_download(repo_id=repo, filename=file_name)
+            shutil.copy2(downloaded, speaker)
+            events.log(f"Đã lấy speaker mặc định: {file_name}")
+            return
+        except Exception as e:
+            log.debug("speaker download miss %s/%s: %s", repo, file_name, e)
+
+    events.warning(
+        "XTTS_SPEAKER_MISSING",
+        "Không tìm thấy sample speaker. Đặt đường dẫn WAV trong Settings (xtts_speaker_wav).",
+    )
+
+
+def download_model(
+    model_id: str,
+    *,
+    progress_cb: ProgressCb | None = None,
+) -> Path:
+    """
+    Download model into LOCALAPPDATA/DubVI/models/<id>.
+    Never silent: emits size estimate and progress events.
+    """
+    meta = catalog_entry(model_id)
+    if meta is None:
+        raise EngineError(ErrorCode.INVALID_ARGS, f"Model không hợp lệ: {model_id}")
+
+    size_mb = int(meta["size_mb"])
+    kind = meta.get("kind", "whisper")
+    events.stage(
+        "downloading_model",
+        f"Sẽ tải model '{model_id}' (~{size_mb} MB) vào {models_dir()}",
+    )
+    events.warning(
+        "MODEL_DOWNLOAD_SIZE",
+        f"Model {model_id} khoảng {size_mb} MB. Cần Internet và đủ dung lượng ổ cứng.",
+        model=model_id,
+        size_mb=size_mb,
+    )
+    if meta.get("license_note"):
+        events.warning("MODEL_LICENSE", str(meta["license_note"]), model=model_id)
+
+    _disk_guard(model_id, size_mb)
+
+    dest = model_path(model_id)
+    dest.mkdir(parents=True, exist_ok=True)
     events.progress("downloading_model", 0, 100, f"Bắt đầu tải {model_id}")
     t0 = time.time()
 
     def _hook(progress: float) -> None:
-        # progress 0..1 if provided by library; otherwise synthetic
         pct = int(max(0, min(100, progress * 100)))
         events.progress("downloading_model", pct, 100, f"Đang tải {model_id}: {pct}%")
         if progress_cb:
             progress_cb(pct, 100, model_id)
 
     try:
-        # faster-whisper download_model(size_or_id, output_dir=..., local_files_only=False)
-        path = fw_download(
-            model_id,
-            output_dir=str(dest),
-            local_files_only=False,
-        )
-        # Some versions return cache path under huggingface hub; ensure copy/marker
-        marker = dest / "downloaded.json"
-        marker.write_text(
-            json.dumps(
-                {
-                    "model_id": model_id,
-                    "path": str(path),
-                    "size_mb_estimate": size_mb,
-                    "downloaded_at": time.time(),
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-    except TypeError:
-        # Older signature without output_dir — use download_root via env HF hub
-        import os
+        if kind == "whisper":
+            try:
+                from faster_whisper.utils import download_model as fw_download
+            except Exception as e:
+                raise EngineError(
+                    ErrorCode.WHISPER_LOAD_FAILED,
+                    f"Không import được faster-whisper để tải model: {e}",
+                ) from e
+            try:
+                path = fw_download(
+                    model_id,
+                    output_dir=str(dest),
+                    local_files_only=False,
+                )
+                _write_marker(dest, model_id, size_mb, {"path": str(path), "kind": kind})
+            except TypeError:
+                import os
 
-        os.environ["HF_HOME"] = str(models_dir() / "hf")
-        path = fw_download(model_id)
-        (dest / "downloaded.json").write_text(
-            json.dumps({"model_id": model_id, "path": str(path)}, indent=2),
-            encoding="utf-8",
-        )
+                os.environ["HF_HOME"] = str(models_dir() / "hf")
+                path = fw_download(model_id)
+                _write_marker(dest, model_id, size_mb, {"path": str(path), "kind": kind})
+        else:
+            hf_repo = meta.get("hf_repo")
+            if not hf_repo:
+                raise EngineError(
+                    ErrorCode.INVALID_ARGS,
+                    f"Model {model_id} thiếu hf_repo trong catalog",
+                )
+            # Clear stale incomplete weight locks from a previous interrupted download
+            for lock in dest.rglob("*.lock"):
+                try:
+                    lock.unlink()
+                except OSError:
+                    pass
+            _download_hf_snapshot(
+                model_id, hf_repo=hf_repo, dest=dest, progress_cb=progress_cb
+            )
+            if kind == "tts" and model_id == "xtts-v2":
+                _ensure_xtts_speaker(dest)
+            if not is_model_downloaded(model_id):
+                raise EngineError(
+                    ErrorCode.WHISPER_LOAD_FAILED,
+                    f"Tải '{model_id}' chưa đủ file trọng số (có thể bị ngắt giữa chừng). "
+                    f"Xóa model rồi tải lại: python -m dubvi models-delete {model_id} --yes "
+                    f"&& python -m dubvi models-download {model_id}",
+                )
+            _write_marker(
+                dest,
+                model_id,
+                size_mb,
+                {"kind": kind, "hf_repo": hf_repo},
+            )
+    except EngineError:
+        raise
     except Exception as e:
         raise EngineError(
             ErrorCode.WHISPER_LOAD_FAILED,
             f"Tải model thất bại (có thể thử lại): {e}",
         ) from e
+
+    if kind != "whisper" and not is_model_downloaded(model_id):
+        raise EngineError(
+            ErrorCode.WHISPER_LOAD_FAILED,
+            f"Model '{model_id}' thiếu file trọng số sau khi tải. Hãy xóa và tải lại.",
+        )
 
     events.progress("downloading_model", 100, 100, f"Xong {model_id}")
     events.log(f"Đã tải model {model_id} trong {time.time() - t0:.0f}s → {dest}")
@@ -230,3 +419,70 @@ def delete_model(model_id: str, *, confirm: bool = False) -> None:
 
 def whisper_download_root() -> str:
     return str(models_dir())
+
+
+# Friendly labels for bundled viXTTS sample voices
+_XTTS_SPEAKER_LABELS: dict[str, str] = {
+    "speaker_default.wav": "Mặc định (đã chọn tự động)",
+    "vi_sample.wav": "Mẫu tiếng Việt (vi_sample)",
+    "nu-nhe-nhang.wav": "Nữ — nhẹ nhàng",
+    "nu-calm.wav": "Nữ — điềm tĩnh",
+    "nu-cham.wav": "Nữ — chậm",
+    "nu-luu-loat.wav": "Nữ — lưu loát",
+    "nu-nhan-nha.wav": "Nữ — nhàn nhã",
+    "nam-calm.wav": "Nam — điềm tĩnh",
+    "nam-cham.wav": "Nam — chậm",
+    "nam-nhanh.wav": "Nam — nhanh",
+    "nam-truyen-cam.wav": "Nam — truyền cảm",
+}
+
+
+def list_xtts_speakers(model_id: str = "xtts-v2") -> list[dict[str, Any]]:
+    """
+    List reference WAV speakers available under the downloaded XTTS model folder.
+    These come with viXTTS (samples/*.wav). Empty list if model not downloaded.
+    """
+    root = model_path(model_id)
+    if not root.is_dir():
+        return []
+
+    found: list[Path] = []
+    for pattern in ("*.wav", "samples/*.wav"):
+        found.extend(sorted(root.glob(pattern)))
+
+    # De-dupe by resolved path, prefer shorter relative names first
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for wav in found:
+        if not wav.is_file() or wav.stat().st_size < 1000:
+            continue
+        key = str(wav.resolve()).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        name = wav.name
+        rel = str(wav.relative_to(root)).replace("\\", "/")
+        label = _XTTS_SPEAKER_LABELS.get(name, name.replace(".wav", "").replace("-", " "))
+        out.append(
+            {
+                "id": rel,
+                "label": label,
+                "path": str(wav),
+                "name": name,
+                "default": name == "speaker_default.wav",
+            }
+        )
+
+    # Put default first, then nữ, then nam, then others
+    def sort_key(item: dict[str, Any]) -> tuple:
+        name = str(item["name"]).lower()
+        if item.get("default"):
+            return (0, name)
+        if name.startswith("nu") or "nu-" in name:
+            return (1, name)
+        if name.startswith("nam") or "nam-" in name:
+            return (2, name)
+        return (3, name)
+
+    out.sort(key=sort_key)
+    return out

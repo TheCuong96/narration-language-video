@@ -37,6 +37,23 @@ async fn pick_output_dir(app: AppHandle) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+async fn pick_speaker_wav(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let file = app
+        .dialog()
+        .file()
+        .add_filter("Audio WAV", &["wav"])
+        .set_title("Chọn file giọng mẫu XTTS (WAV 3–10 giây)")
+        .blocking_pick_file();
+    Ok(file.and_then(|f| f.into_path().ok().map(|p| p.to_string_lossy().to_string())))
+}
+
+#[tauri::command]
+async fn list_xtts_speakers() -> Result<Value, String> {
+    engine::run_engine_json(&["list-xtts-speakers"]).await
+}
+
+#[tauri::command]
 async fn open_folder(app: AppHandle, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     app.opener()
@@ -157,6 +174,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             pick_videos,
             pick_output_dir,
+            pick_speaker_wav,
             open_folder,
             probe_videos,
             start_job,
@@ -168,6 +186,7 @@ pub fn run() {
             review_set,
             continue_after_review,
             list_models,
+            list_xtts_speakers,
             download_model,
             delete_model,
             get_settings,

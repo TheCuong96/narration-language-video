@@ -23,12 +23,12 @@
 |--------|---------|
 | `pipeline.py` | Hàng đợi tuần tự, resume, review pause |
 | `transcription.py` | faster-whisper, CPU mặc định, GPU fallback |
-| `translation.py` | Provider interface → deep-translator |
-| `tts.py` | Provider interface → edge-tts |
+| `translation.py` | Provider interface → deep-translator hoặc NLLB offline |
+| `tts.py` | Provider interface → edge-tts hoặc XTTS-v2 offline |
 | `ffmpeg.py` / `audio.py` | Extract FLAC, align, mux (copy video khi được) |
-| `models_manager.py` | Tải/xóa model → `%LOCALAPPDATA%/DubVI/models` |
+| `models_manager.py` | Tải/xóa Whisper/NLLB/XTTS → `%LOCALAPPDATA%/DubVI/models` |
 | `jobs.py` / `queue.py` | Job id, cancel flag, queue.json |
-| `providers/` | Community + stub Google/Azure |
+| `providers/` | Community + offline NLLB/XTTS + stub Google/Azure |
 
 ## IPC
 

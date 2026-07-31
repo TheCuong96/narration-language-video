@@ -57,9 +57,12 @@ def translate_with_backoff(
     base_delay: float = 1.0,
 ) -> str:
     last_err: Exception | None = None
-    for attempt in range(max_attempts):
+    attempts = max_attempts if getattr(provider, "requires_internet", True) else min(2, max_attempts)
+    for attempt in range(attempts):
         try:
             return provider.translate(text, source=source, target=target)
+        except EngineError:
+            raise
         except Exception as e:
             last_err = e
             delay = base_delay * (2**attempt)
@@ -67,7 +70,7 @@ def translate_with_backoff(
             time.sleep(delay)
     raise EngineError(
         ErrorCode.TRANSLATE_FAILED,
-        f"Dịch thất bại sau {max_attempts} lần: {last_err}",
+        f"Dịch thất bại sau {attempts} lần: {last_err}",
     )
 
 
@@ -80,6 +83,8 @@ def translate_segments(
     terms: list[str],
     cancel: CancellationToken | None = None,
     tracker=None,
+    provider_name: str = "deep-translator",
+    prefer_gpu: bool = False,
 ) -> list[Segment]:
     cached = cache.load_segments(out_path)
     if cached is not None and len(cached) == len(segments) and all(s.text_vi for s in cached):
@@ -92,14 +97,17 @@ def translate_segments(
     from .providers import get_translate_provider
 
     src = "auto" if source_lang in ("", "auto") else source_lang
-    translator = get_translate_provider("deep-translator")
+    translator = get_translate_provider(provider_name, prefer_gpu=prefer_gpu)
     if tracker:
         tracker.begin_stage(
             Stage.TRANSLATING,
-            f"Đang dịch {len(segments)} đoạn ({src} → {target_lang})",
+            f"Đang dịch {len(segments)} đoạn ({src} → {target_lang}) [{translator.name}]",
         )
     else:
-        events.stage(Stage.TRANSLATING, f"Đang dịch {len(segments)} đoạn ({src} → {target_lang})")
+        events.stage(
+            Stage.TRANSLATING,
+            f"Đang dịch {len(segments)} đoạn ({src} → {target_lang}) [{translator.name}]",
+        )
     events.log(translator.privacy_note())
 
     # Resume: reuse already-translated segments
@@ -111,6 +119,7 @@ def translate_segments(
 
     result: list[Segment] = []
     total = len(segments)
+    throttle = 0.25 if translator.requires_internet else 0.0
 
     for i, s in enumerate(segments):
         if cancel:
@@ -137,7 +146,8 @@ def translate_segments(
                     text_vi=clean_vi(vi),
                 )
             )
-            time.sleep(0.25)
+            if throttle:
+                time.sleep(throttle)
 
         if (i + 1) % 1 == 0 or i + 1 == total:
             msg = f"Đã dịch {i + 1}/{total} đoạn"

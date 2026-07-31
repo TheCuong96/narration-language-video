@@ -155,6 +155,8 @@ def process_one(
             terms=cfg.terms,
             cancel=cancel,
             tracker=tracker,
+            provider_name=cfg.translate_provider,
+            prefer_gpu=cfg.prefer_gpu,
         )
 
     script_path = work / cache.SCRIPT_VI
@@ -234,6 +236,10 @@ def _finish_from_tts(
                 voice=cfg.voice,
                 cancel=cancel,
                 tracker=tracker,
+                provider_name=cfg.tts_provider,
+                prefer_gpu=cfg.prefer_gpu,
+                speaker_wav=cfg.xtts_speaker_wav,
+                language=cfg.target_lang or "vi",
             )
         )
         cancel.check()
@@ -376,6 +382,9 @@ def run_job(cfg: JobConfig) -> int:
             "force": cfg.force,
             "audio_mode": cfg.audio_mode.value,
             "review_translation": cfg.review_translation,
+            "translate_provider": cfg.translate_provider,
+            "tts_provider": cfg.tts_provider,
+            "xtts_speaker_wav": cfg.xtts_speaker_wav,
         },
         job_id=cfg.job_id,
     )

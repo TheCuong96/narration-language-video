@@ -54,9 +54,9 @@ FRIENDLY: dict[str, FriendlyError] = {
     ),
     ErrorCode.WHISPER_LOAD_FAILED.value: FriendlyError(
         ErrorCode.WHISPER_LOAD_FAILED.value,
-        "Không tải được model Whisper",
+        "Không tải được model nhận dạng lời nói",
         "Model nhận dạng lời nói chưa sẵn sàng hoặc bị lỗi.",
-        "Mở Settings → Model Whisper để tải lại.",
+        "Mở Settings → Model nhận dạng lời nói để tải lại.",
     ),
     ErrorCode.TRANSCRIBE_FAILED.value: FriendlyError(
         ErrorCode.TRANSCRIBE_FAILED.value,

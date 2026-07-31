@@ -80,6 +80,9 @@ export interface JobOptions {
   review: boolean;
   force: boolean;
   preferGpu: boolean;
+  translateProvider: string;
+  ttsProvider: string;
+  xttsSpeakerWav?: string;
 }
 
 export interface WhisperModelInfo {
@@ -93,6 +96,17 @@ export interface WhisperModelInfo {
   downloaded: boolean;
   local_mb: number;
   download_root: string;
+  kind?: "whisper" | "translate" | "tts" | string;
+  provider?: string;
+  license_note?: string;
+}
+
+export interface XttsSpeakerOption {
+  id: string;
+  label: string;
+  path: string;
+  name: string;
+  default?: boolean;
 }
 
 export interface AppSettings {
@@ -106,6 +120,7 @@ export interface AppSettings {
   review_by_default: boolean;
   translate_provider: string;
   tts_provider: string;
+  xtts_speaker_wav?: string;
 }
 
 export interface ProbeInfo {

@@ -44,6 +44,21 @@ def _add_run_shared(p: argparse.ArgumentParser) -> None:
     p.add_argument("--review", action="store_true")
     p.add_argument("--translate-only", action="store_true")
     p.add_argument(
+        "--translate-provider",
+        default=None,
+        help="deep-translator (online) | nllb (offline)",
+    )
+    p.add_argument(
+        "--tts-provider",
+        default=None,
+        help="edge-tts (online) | xtts-v2 (offline)",
+    )
+    p.add_argument(
+        "--xtts-speaker",
+        default=None,
+        help="Path to reference WAV for XTTS (optional)",
+    )
+    p.add_argument(
         "--from-stage",
         choices=[s.value for s in StartFrom],
         default=StartFrom.AUTO.value,
@@ -110,10 +125,16 @@ def _build_parser() -> argparse.ArgumentParser:
     probe_p = sub.add_parser("probe", help="Probe video duration/size for UI")
     probe_p.add_argument("paths", nargs="+", type=Path)
 
-    models_p = sub.add_parser("models", help="List Whisper models")
-    models_dl = sub.add_parser("models-download", help="Download a Whisper model")
+    models_p = sub.add_parser("models", help="List Whisper / NLLB / XTTS models")
+    models_p.add_argument(
+        "--kind",
+        choices=["whisper", "translate", "tts"],
+        default=None,
+        help="Filter by model kind",
+    )
+    models_dl = sub.add_parser("models-download", help="Download a model (Whisper/NLLB/XTTS)")
     models_dl.add_argument("model_id")
-    models_rm = sub.add_parser("models-delete", help="Delete a Whisper model cache")
+    models_rm = sub.add_parser("models-delete", help="Delete a model cache")
     models_rm.add_argument("model_id")
     models_rm.add_argument("--yes", action="store_true")
 
@@ -129,8 +150,14 @@ def _build_parser() -> argparse.ArgumentParser:
     voices_p = sub.add_parser("list-voices", help="List Vietnamese edge-tts voices")
     voices_p.add_argument("--json", action="store_true", dest="as_json")
 
+    xtts_sp = sub.add_parser(
+        "list-xtts-speakers",
+        help="List bundled XTTS reference WAV speakers (after model download)",
+    )
+    xtts_sp.add_argument("--model-id", default="xtts-v2")
+
     privacy = sub.add_parser("privacy-notice", help="Print privacy notice JSON")
-    _ = (models_p, privacy, doctor)
+    _ = (models_p, privacy, doctor, xtts_sp)
 
     return p
 
@@ -141,6 +168,10 @@ def _cfg_from_run(args: argparse.Namespace) -> JobConfig:
     input_dir = args.input.expanduser().resolve() if args.input else None
     if input_dir is None and not files:
         raise SystemExit("Cần --input thư mục hoặc --files danh sách video")
+    settings = load_settings()
+    translate_provider = args.translate_provider or settings.translate_provider
+    tts_provider = args.tts_provider or settings.tts_provider
+    xtts_speaker = args.xtts_speaker or settings.xtts_speaker_wav
     return JobConfig(
         input_dir=input_dir,
         input_files=files,
@@ -161,36 +192,60 @@ def _cfg_from_run(args: argparse.Namespace) -> JobConfig:
         mix_original_db=args.mix_db,
         start_from=StartFrom(args.from_stage),
         allow_reencode=not args.no_reencode,
+        translate_provider=translate_provider,
+        tts_provider=tts_provider,
+        xtts_speaker_wav=xtts_speaker or "",
     )
 
 
 def _privacy_notice() -> dict:
+    settings = load_settings()
+    translate = settings.translate_provider or "deep-translator"
+    tts = settings.tts_provider or "edge-tts"
+    offline_translate = translate.lower() in ("nllb", "nllb-offline", "offline-translate")
+    offline_tts = tts.lower() in ("xtts-v2", "xtts", "vixtts", "offline-tts")
+    leaves = []
+    if not offline_translate:
+        leaves.append(
+            "Đoạn transcript gửi tới dịch vụ dịch (deep-translator / Google Translate web)."
+        )
+    if not offline_tts:
+        leaves.append("Đoạn text đã dịch gửi tới edge-tts để tạo giọng.")
+    if not leaves:
+        leaves.append("Không gửi transcript/TTS ra mạng khi dùng NLLB + XTTS (trừ lúc tải model).")
+    stays = [
+        "File video gốc và kết quả.",
+        "Whisper model và nhận dạng lời nói.",
+        "FFmpeg tách/ghép media.",
+        "Cache job trong %LOCALAPPDATA%/DubVI.",
+    ]
+    if offline_translate:
+        stays.append("Dịch NLLB trên máy (model trong %LOCALAPPDATA%/DubVI/models).")
+    if offline_tts:
+        stays.append("TTS XTTS-v2 trên máy (model trong %LOCALAPPDATA%/DubVI/models).")
     return {
         "whisper_local": True,
         "ffmpeg_local": True,
-        "translate_needs_internet": True,
-        "tts_needs_internet": True,
+        "translate_needs_internet": not offline_translate,
+        "tts_needs_internet": not offline_tts,
         "video_uploaded_to_dubvi": False,
-        "what_leaves_device": [
-            "Đoạn transcript gửi tới dịch vụ dịch (deep-translator / Google Translate web).",
-            "Đoạn text đã dịch gửi tới edge-tts để tạo giọng.",
-        ],
-        "what_stays_local": [
-            "File video gốc và kết quả.",
-            "Whisper model và nhận dạng lời nói.",
-            "FFmpeg tách/ghép media.",
-            "Cache job trong %LOCALAPPDATA%/DubVI.",
-        ],
+        "what_leaves_device": leaves,
+        "what_stays_local": stays,
         "providers_community": {
-            "translate": "deep-translator",
-            "tts": "edge-tts",
+            "translate": translate,
+            "tts": tts,
+        },
+        "providers_offline": {
+            "translate": "nllb",
+            "tts": "xtts-v2",
         },
         "future_providers": [
             "google-cloud-translate",
             "google-cloud-tts",
             "azure-speech",
         ],
-        "note": "Không log API key, transcript riêng tư hoặc thông tin nhạy cảm vào log công khai.",
+        "note": "Không log API key, transcript riêng tư hoặc thông tin nhạy cảm vào log công khai. "
+        "XTTS-v2 dùng license Coqui CPML (không thương mại).",
     }
 
 
@@ -229,6 +284,66 @@ def main(argv: list[str] | None = None) -> int:
                 "free_mb": free_disk_bytes(appdata_root()) // (1024**2),
             }
         )
+        settings = load_settings()
+        if settings.translate_provider in ("nllb", "nllb-offline", "offline-translate"):
+            try:
+                import transformers  # noqa: F401
+                import torch  # noqa: F401
+
+                report["checks"].append({"name": "offline_nllb_deps", "ok": True})
+            except ImportError as e:
+                report["ok"] = False
+                report["checks"].append(
+                    {
+                        "name": "offline_nllb_deps",
+                        "ok": False,
+                        "error": f"{e} — pip install -r engine/requirements-offline.txt",
+                    }
+                )
+            nllb_ok = models_manager.is_model_downloaded("nllb-200-distilled-600M")
+            report["checks"].append(
+                {
+                    "name": "model_nllb",
+                    "ok": nllb_ok,
+                    "error": None
+                    if nllb_ok
+                    else "Chưa tải — python -m dubvi models-download nllb-200-distilled-600M",
+                }
+            )
+            if not nllb_ok:
+                report["ok"] = False
+        if settings.tts_provider in ("xtts-v2", "xtts", "vixtts", "offline-tts"):
+            try:
+                import torch  # noqa: F401
+                import TTS  # noqa: F401
+                from TTS.tts.models.xtts import Xtts  # noqa: F401
+
+                report["checks"].append({"name": "offline_xtts_deps", "ok": True})
+            except ImportError as e:
+                report["ok"] = False
+                report["checks"].append(
+                    {
+                        "name": "offline_xtts_deps",
+                        "ok": False,
+                        "error": (
+                            f"{e} — pip uninstall -y TTS coqpit && "
+                            "pip install -r engine/requirements-offline.txt && "
+                            "pip install \"coqui-tts[codec]>=0.27.0\""
+                        ),
+                    }
+                )
+            xtts_ok = models_manager.is_model_downloaded("xtts-v2")
+            report["checks"].append(
+                {
+                    "name": "model_xtts",
+                    "ok": xtts_ok,
+                    "error": None
+                    if xtts_ok
+                    else "Chưa tải — python -m dubvi models-download xtts-v2",
+                }
+            )
+            if not xtts_ok:
+                report["ok"] = False
         report["models"] = models_manager.list_models()
         report["privacy"] = _privacy_notice()
         print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -243,7 +358,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "models":
         from . import models_manager
 
-        print(json.dumps(models_manager.list_models(), ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                models_manager.list_models(kind=getattr(args, "kind", None)),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return 0
 
     if args.command == "models-download":
@@ -316,6 +437,13 @@ def main(argv: list[str] | None = None) -> int:
                 )
         return 0
 
+    if args.command == "list-xtts-speakers":
+        from . import models_manager
+
+        speakers = models_manager.list_xtts_speakers(args.model_id)
+        print(json.dumps(speakers, ensure_ascii=False, indent=2))
+        return 0
+
     if args.command == "queue":
         data = queue.load_queue(args.job_id)
         if not data:
@@ -352,6 +480,11 @@ def main(argv: list[str] | None = None) -> int:
             mix_original_db=args.mix_db if args.mix_db is not None else DEFAULT_MIX_ORIGINAL_DB,
             start_from=StartFrom.TTS,
             review_translation=False,
+            prefer_gpu=bool(opts.get("prefer_gpu")),
+            translate_provider=opts.get("translate_provider") or "deep-translator",
+            tts_provider=opts.get("tts_provider") or "edge-tts",
+            xtts_speaker_wav=opts.get("xtts_speaker_wav") or "",
+            whisper_model=opts.get("model") or DEFAULT_MODEL,
         )
         return continue_stem(cfg, args.stem)
 
@@ -381,6 +514,9 @@ def main(argv: list[str] | None = None) -> int:
             retry_stems=stems,
             start_from=StartFrom.AUTO,
             review_translation=bool(opts.get("review_translation")),
+            translate_provider=opts.get("translate_provider") or "deep-translator",
+            tts_provider=opts.get("tts_provider") or "edge-tts",
+            xtts_speaker_wav=opts.get("xtts_speaker_wav") or "",
         )
         return run_job(cfg)
 
@@ -423,6 +559,9 @@ def main(argv: list[str] | None = None) -> int:
             review_translation=bool(opts.get("review_translation")),
             # Never force-clear cache on resume — continue from last completed stage.
             force=False,
+            translate_provider=opts.get("translate_provider") or "deep-translator",
+            tts_provider=opts.get("tts_provider") or "edge-tts",
+            xtts_speaker_wav=opts.get("xtts_speaker_wav") or "",
         )
         return run_job(cfg)
 
