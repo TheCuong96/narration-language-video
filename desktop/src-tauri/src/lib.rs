@@ -81,6 +81,61 @@ async fn probe_videos(paths: Vec<String>) -> Result<Value, String> {
 }
 
 #[tauri::command]
+async fn cut_segment(
+    input: String,
+    start: String,
+    end: String,
+    output: Option<String>,
+    name: Option<String>,
+) -> Result<Value, String> {
+    let mut args = vec![
+        "cut-segment".to_string(),
+        "--input".to_string(),
+        input,
+        "--start".to_string(),
+        start,
+        "--end".to_string(),
+        end,
+    ];
+    if let Some(out) = output {
+        if !out.trim().is_empty() {
+            args.push("--output".to_string());
+            args.push(out);
+        }
+    }
+    if let Some(n) = name {
+        if !n.trim().is_empty() {
+            args.push("--name".to_string());
+            args.push(n);
+        }
+    }
+    let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    match engine::run_engine_json(&str_args).await {
+        Ok(value) => {
+            if value.get("ok") == Some(&Value::Bool(false)) {
+                let msg = value
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Không cắt được đoạn video");
+                return Err(msg.to_string());
+            }
+            Ok(value)
+        }
+        Err(e) => {
+            // engine failed: … { "ok": false, "error": "…" }
+            if let Some(start) = e.find('{') {
+                if let Ok(v) = serde_json::from_str::<Value>(&e[start..]) {
+                    if let Some(msg) = v.get("error").and_then(|x| x.as_str()) {
+                        return Err(msg.to_string());
+                    }
+                }
+            }
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command]
 async fn probe_url(url: String) -> Result<Value, String> {
     engine::run_engine_json(&["probe-url", &url]).await
 }
@@ -209,6 +264,7 @@ pub fn run() {
             pick_speaker_wav,
             open_folder,
             probe_videos,
+            cut_segment,
             probe_url,
             download_url,
             url_help,

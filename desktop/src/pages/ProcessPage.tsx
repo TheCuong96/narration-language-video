@@ -113,6 +113,17 @@ interface Props {
   onRetry: () => void;
   onOpenOut: () => void;
   onOpenReview: (stem: string) => void;
+  cloneSource: string;
+  cloneStart: string;
+  cloneEnd: string;
+  cloneName: string;
+  cloningSegment: boolean;
+  onCloneSource: (v: string) => void;
+  onCloneStart: (v: string) => void;
+  onCloneEnd: (v: string) => void;
+  onCloneName: (v: string) => void;
+  onCloneSegment: () => void;
+  onPickCloneSource: (path: string) => void;
 }
 
 export function ProcessPage(props: Props) {
@@ -169,6 +180,17 @@ export function ProcessPage(props: Props) {
     onRetry,
     onOpenOut,
     onOpenReview,
+    cloneSource,
+    cloneStart,
+    cloneEnd,
+    cloneName,
+    cloningSegment,
+    onCloneSource,
+    onCloneStart,
+    onCloneEnd,
+    onCloneName,
+    onCloneSegment,
+    onPickCloneSource,
   } = props;
 
   const [showUrlHelp, setShowUrlHelp] = useState(false);
@@ -188,6 +210,7 @@ export function ProcessPage(props: Props) {
   const stageKey = fileProgress.stage || "";
   const fileIndex = overallProgress.fileIndex || 0;
   const settingsLocked = busy || downloadingUrl;
+  const cloneLocked = settingsLocked || cloningSegment;
   const hasCompletedResult =
     !busy &&
     !downloadingUrl &&
@@ -420,6 +443,79 @@ export function ProcessPage(props: Props) {
             </p>
           </div>
         )}
+      </section>
+
+      <section className={`panel clone-panel ${cloneLocked ? "settings-locked" : ""}`}>
+        <h2>Clone đoạn video</h2>
+        <p className="muted url-lead">
+          Chọn video đã có, nhập khoảng thời gian → tạo file mới và thêm vào hàng đợi
+          thuyết minh.
+        </p>
+        <div className="row url-row">
+          <label htmlFor="clone-source">Video nguồn</label>
+          <select
+            id="clone-source"
+            value={cloneSource}
+            onChange={(e) => onCloneSource(e.target.value)}
+            disabled={cloneLocked || queue.length === 0}
+          >
+            <option value="">
+              {queue.length === 0 ? "Thêm video vào hàng đợi trước" : "— Chọn video —"}
+            </option>
+            {queue.map((item) => (
+              <option key={`${item.index}-${item.input}`} value={item.input}>
+                {item.stem}
+                {item.duration_label ? ` (${item.duration_label})` : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="row url-row">
+          <label htmlFor="clone-name">Tên video</label>
+          <input
+            id="clone-name"
+            value={cloneName}
+            onChange={(e) => onCloneName(e.target.value)}
+            placeholder="vd: doan_gioi_thieu"
+            disabled={cloneLocked}
+          />
+        </div>
+        <div className="row clone-times">
+          <label htmlFor="clone-start">Bắt đầu</label>
+          <input
+            id="clone-start"
+            value={cloneStart}
+            onChange={(e) => onCloneStart(e.target.value)}
+            placeholder="0 hoặc 0:00"
+            disabled={cloneLocked}
+          />
+          <label htmlFor="clone-end">Kết thúc</label>
+          <input
+            id="clone-end"
+            value={cloneEnd}
+            onChange={(e) => onCloneEnd(e.target.value)}
+            placeholder="1:30 hoặc 90"
+            disabled={cloneLocked}
+          />
+          <button
+            type="button"
+            className="primary"
+            disabled={
+              cloneLocked ||
+              !cloneSource.trim() ||
+              !cloneStart.trim() ||
+              !cloneEnd.trim() ||
+              !cloneName.trim()
+            }
+            onClick={onCloneSegment}
+          >
+            {cloningSegment ? "Đang cắt…" : "Clone & thêm hàng đợi"}
+          </button>
+        </div>
+        <p className="muted url-dir-hint">
+          Thời gian: giây (90) hoặc MM:SS / HH:MM:SS. File lưu cạnh video nguồn với tên
+          bạn đặt (tự thêm đuôi <code>.mp4</code>/<code>.mkv</code>… nếu bỏ trống đuôi).
+        </p>
       </section>
 
       <div className="grid">
@@ -743,11 +839,22 @@ export function ProcessPage(props: Props) {
                   </div>
                 ) : null}
                 {item.error && <div className="q-err">{item.error}</div>}
-                {item.status === "review" && (
-                  <button type="button" onClick={() => onOpenReview(item.stem)}>
-                    Mở transcript
-                  </button>
-                )}
+                <div className="q-actions">
+                  {!settingsLocked && item.input ? (
+                    <button
+                      type="button"
+                      className="linkish"
+                      onClick={() => onPickCloneSource(item.input)}
+                    >
+                      Clone đoạn
+                    </button>
+                  ) : null}
+                  {item.status === "review" && (
+                    <button type="button" onClick={() => onOpenReview(item.stem)}>
+                      Mở transcript
+                    </button>
+                  )}
+                </div>
               </div>
               <span className={`badge ${item.status}`}>{statusLabel(item.status)}</span>
             </li>

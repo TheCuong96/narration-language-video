@@ -125,6 +125,39 @@ def _build_parser() -> argparse.ArgumentParser:
     probe_p = sub.add_parser("probe", help="Probe video duration/size for UI")
     probe_p.add_argument("paths", nargs="+", type=Path)
 
+    cut_p = sub.add_parser(
+        "cut-segment",
+        help="Clone a time range from an existing video into a new file",
+    )
+    cut_p.add_argument("--input", "-i", type=Path, required=True, help="Source video")
+    cut_p.add_argument(
+        "--start",
+        required=True,
+        help="Start time (seconds or MM:SS / HH:MM:SS)",
+    )
+    cut_p.add_argument(
+        "--end",
+        required=True,
+        help="End time (seconds or MM:SS / HH:MM:SS)",
+    )
+    cut_p.add_argument(
+        "--output",
+        "-o",
+        type=Path,
+        default=None,
+        help="Full output path (overrides --name)",
+    )
+    cut_p.add_argument(
+        "--name",
+        default=None,
+        help="Output file name / stem next to source (e.g. my_clip or my_clip.mp4)",
+    )
+    cut_p.add_argument(
+        "--reencode",
+        action="store_true",
+        help="Force re-encode instead of stream copy",
+    )
+
     probe_url_p = sub.add_parser(
         "probe-url",
         help="Probe remote video metadata via yt-dlp (no download)",
@@ -410,6 +443,38 @@ def main(argv: list[str] | None = None) -> int:
 
         print(json.dumps(probe_many(list(args.paths)), ensure_ascii=False, indent=2))
         return 0
+
+    if args.command == "cut-segment":
+        from .media import clone_video_segment
+        from .system_info import EngineError
+
+        try:
+            result = clone_video_segment(
+                args.input,
+                args.start,
+                args.end,
+                output=args.output,
+                name=args.name,
+                copy=not args.reencode,
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        except EngineError as e:
+            print(
+                json.dumps(
+                    {"ok": False, "code": e.code.value, "error": e.message},
+                    ensure_ascii=False,
+                )
+            )
+            return 1
+        except Exception as e:
+            print(
+                json.dumps(
+                    {"ok": False, "code": "INTERNAL", "error": str(e)},
+                    ensure_ascii=False,
+                )
+            )
+            return 1
 
     if args.command == "probe-url":
         from . import ytdlp as ytdlp_mod

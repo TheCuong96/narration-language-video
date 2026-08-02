@@ -147,6 +147,23 @@ export interface ProbeInfo {
   error?: string | null;
 }
 
+export interface CutSegmentResult {
+  ok: boolean;
+  path: string;
+  source: string;
+  start_sec: number;
+  end_sec: number;
+  duration_sec: number;
+  duration_label: string;
+  size_bytes: number;
+  size_label: string;
+  stem: string;
+  name: string;
+  copied?: boolean;
+  code?: string;
+  error?: string;
+}
+
 export interface DoctorReport {
   ok: boolean;
   checks: { name: string; ok: boolean; path?: string; error?: string; free_mb?: number }[];

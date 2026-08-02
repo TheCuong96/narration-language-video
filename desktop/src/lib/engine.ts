@@ -1,5 +1,6 @@
 import type {
   AppSettings,
+  CutSegmentResult,
   DoctorReport,
   EngineEvent,
   JobOptions,
@@ -62,6 +63,23 @@ export async function openFolder(path: string): Promise<void> {
 
 export async function probeVideos(paths: string[]): Promise<ProbeInfo[]> {
   return invoke<ProbeInfo[]>("probe_videos", { paths });
+}
+
+/** Clone [start, end) from an existing local video into a new file. */
+export async function cutSegment(opts: {
+  input: string;
+  start: string;
+  end: string;
+  output?: string | null;
+  name?: string | null;
+}): Promise<CutSegmentResult> {
+  return invoke<CutSegmentResult>("cut_segment", {
+    input: opts.input,
+    start: opts.start,
+    end: opts.end,
+    output: opts.output?.trim() || null,
+    name: opts.name?.trim() || null,
+  });
 }
 
 export interface UrlProbeInfo {

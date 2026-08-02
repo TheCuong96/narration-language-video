@@ -6,6 +6,7 @@ import {
   deleteModel,
   doctor as runDoctor,
   downloadModel,
+  cutSegment,
   downloadUrl,
   filterVideoFiles,
   getQueue,
@@ -49,6 +50,17 @@ function parentDir(path: string): string {
 function baseName(path: string): string {
   const i = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
   return i >= 0 ? path.slice(i + 1) : path;
+}
+
+function stemName(path: string): string {
+  return baseName(path).replace(/\.[^.]+$/, "");
+}
+
+/** Suggested clip stem from source + time range (no extension). */
+function suggestCloneName(source: string, start: string, end: string): string {
+  const stem = stemName(source) || "clip";
+  const tag = (t: string) => t.trim().replace(/:/g, "-") || "0";
+  return `${stem}_clip_${tag(start)}-${tag(end || "end")}`;
 }
 import { useElapsed } from "./hooks/useElapsed";
 import { ProcessPage } from "./pages/ProcessPage";
@@ -144,6 +156,12 @@ export default function App() {
   const [lastUrlDownload, setLastUrlDownload] = useState<UrlDownloadNotice | null>(
     null,
   );
+  const [cloneSource, setCloneSource] = useState("");
+  const [cloneStart, setCloneStart] = useState("0");
+  const [cloneEnd, setCloneEnd] = useState("");
+  const [cloneName, setCloneName] = useState("");
+  const [cloningSegment, setCloningSegment] = useState(false);
+  const cloneNameTouchedRef = useRef(false);
   const urlJobIdRef = useRef<string | null>(null);
   const urlDownloadedPathsRef = useRef<Set<string>>(new Set());
 
@@ -402,6 +420,10 @@ export default function App() {
     if (opts?.fromUrl) {
       for (const p of paths) urlDownloadedPathsRef.current.add(p);
     }
+    const nextSource = cloneSource || paths[0] || "";
+    if (!cloneSource && paths[0]) {
+      setCloneSource(paths[0]);
+    }
     try {
       const probed = await probeVideos(merged);
       setQueue(
@@ -418,6 +440,18 @@ export default function App() {
           from_url: urlDownloadedPathsRef.current.has(p.path),
         })),
       );
+      let endForSuggest = cloneEnd.trim();
+      if (!endForSuggest) {
+        const srcPath = nextSource;
+        const info = probed.find((p) => p.path === srcPath) || probed[0];
+        if (info?.duration_sec && info.duration_sec > 0) {
+          endForSuggest = String(Math.floor(info.duration_sec));
+          setCloneEnd(endForSuggest);
+        }
+      }
+      if (nextSource && !cloneNameTouchedRef.current) {
+        setCloneName(suggestCloneName(nextSource, cloneStart, endForSuggest));
+      }
       return probed;
     } catch {
       setQueue(
@@ -535,6 +569,95 @@ export default function App() {
       if (dir) setDownloadDir(dir);
     } catch (e) {
       pushLog({ text: String(e), cls: "warn" });
+    }
+  }
+
+  function refreshCloneNameSuggestion(
+    source: string,
+    start: string,
+    end: string,
+    force = false,
+  ) {
+    if (!source) return;
+    if (force || !cloneNameTouchedRef.current) {
+      setCloneName(suggestCloneName(source, start, end));
+    }
+  }
+
+  function onPickCloneSource(path: string) {
+    setCloneSource(path);
+    const item = queue.find((q) => q.input === path);
+    let end = cloneEnd.trim();
+    if (item?.duration_sec && item.duration_sec > 0 && !end) {
+      end = String(Math.floor(item.duration_sec));
+      setCloneEnd(end);
+    }
+    cloneNameTouchedRef.current = false;
+    refreshCloneNameSuggestion(path, cloneStart, end, true);
+    pushLog({ text: `Chọn nguồn clone: ${baseName(path)}` });
+  }
+
+  function onCloneSourceChange(path: string) {
+    setCloneSource(path);
+    if (!path) return;
+    const item = queue.find((q) => q.input === path);
+    let end = cloneEnd.trim();
+    if (item?.duration_sec && item.duration_sec > 0 && !end) {
+      end = String(Math.floor(item.duration_sec));
+      setCloneEnd(end);
+    }
+    cloneNameTouchedRef.current = false;
+    refreshCloneNameSuggestion(path, cloneStart, end, true);
+  }
+
+  function onCloneStartChange(v: string) {
+    setCloneStart(v);
+    refreshCloneNameSuggestion(cloneSource, v, cloneEnd);
+  }
+
+  function onCloneEndChange(v: string) {
+    setCloneEnd(v);
+    refreshCloneNameSuggestion(cloneSource, cloneStart, v);
+  }
+
+  function onCloneNameChange(v: string) {
+    cloneNameTouchedRef.current = true;
+    setCloneName(v);
+  }
+
+  async function onCloneSegment() {
+    const input = cloneSource.trim();
+    const start = cloneStart.trim();
+    const end = cloneEnd.trim();
+    const name = cloneName.trim();
+    if (!input || !start || !end || !name || busy || downloadingUrl || cloningSegment) {
+      return;
+    }
+    setCloningSegment(true);
+    pushLog({
+      text: `Clone «${name}» · ${start} → ${end} từ ${baseName(input)}`,
+    });
+    try {
+      const result = await cutSegment({ input, start, end, name });
+      pushLog({
+        text: `Đã tạo clip: ${result.name} (${result.duration_label || "—"})`,
+      });
+      await addFiles([result.path]);
+      setCloneSource(result.path);
+      cloneNameTouchedRef.current = false;
+      setCloneName(suggestCloneName(result.path, "0", end));
+      setCloneStart("0");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setErr({
+        title: "Không clone được đoạn video",
+        body: msg,
+      });
+      setErrTech(msg);
+      setErrOpen(true);
+      pushLog({ text: msg, cls: "error" });
+    } finally {
+      setCloningSegment(false);
     }
   }
 
@@ -825,6 +948,17 @@ export default function App() {
           onRetry={onRetry}
           onOpenOut={() => outputDir && openFolder(outputDir)}
           onOpenReview={loadReview}
+          cloneSource={cloneSource}
+          cloneStart={cloneStart}
+          cloneEnd={cloneEnd}
+          cloneName={cloneName}
+          cloningSegment={cloningSegment}
+          onCloneSource={onCloneSourceChange}
+          onCloneStart={onCloneStartChange}
+          onCloneEnd={onCloneEndChange}
+          onCloneName={onCloneNameChange}
+          onCloneSegment={() => void onCloneSegment()}
+          onPickCloneSource={onPickCloneSource}
         />
       )}
 

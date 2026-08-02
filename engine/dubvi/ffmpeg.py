@@ -141,6 +141,124 @@ def probe_duration(path: Path) -> float:
     return float(out)
 
 
+def extract_video_segment(
+    src: Path,
+    dst: Path,
+    start_sec: float,
+    end_sec: float,
+    *,
+    copy: bool = True,
+) -> dict:
+    """
+    Clone [start_sec, end_sec) from src into a new video file at dst.
+
+    Tries stream copy first (fast). Falls back to H.264/AAC re-encode if copy fails
+    (e.g. keyframe / container mismatch). Source file is never modified.
+    """
+    if start_sec < 0:
+        raise EngineError(ErrorCode.INVALID_ARGS, "Thời điểm bắt đầu phải ≥ 0")
+    if end_sec <= start_sec:
+        raise EngineError(
+            ErrorCode.INVALID_ARGS,
+            "Thời điểm kết thúc phải lớn hơn thời điểm bắt đầu",
+        )
+
+    src = src.expanduser().resolve()
+    if not src.is_file():
+        raise EngineError(ErrorCode.INPUT_NOT_FOUND, f"Không tìm thấy video: {src}")
+
+    total = probe_duration(src)
+    if total > 0 and start_sec >= total:
+        raise EngineError(
+            ErrorCode.INVALID_ARGS,
+            f"Bắt đầu ({start_sec:.2f}s) vượt quá độ dài video ({total:.2f}s)",
+        )
+    if total > 0 and end_sec > total + 0.05:
+        end_sec = total
+
+    duration = end_sec - start_sec
+    if duration < 0.05:
+        raise EngineError(ErrorCode.INVALID_ARGS, "Đoạn cắt quá ngắn (< 0.05s)")
+
+    dst = dst.expanduser().resolve()
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(f"{dst.stem}.partial{dst.suffix}")
+
+    used_copy = False
+    if copy:
+        try:
+            run_ffmpeg(
+                [
+                    ffmpeg_path(),
+                    "-y",
+                    "-ss",
+                    f"{start_sec:.3f}",
+                    "-i",
+                    str(src),
+                    "-t",
+                    f"{duration:.3f}",
+                    "-map",
+                    "0",
+                    "-c",
+                    "copy",
+                    "-avoid_negative_ts",
+                    "make_zero",
+                    str(tmp),
+                ]
+            )
+            used_copy = True
+        except EngineError:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+            used_copy = False
+
+    if not used_copy:
+        run_ffmpeg(
+            [
+                ffmpeg_path(),
+                "-y",
+                "-ss",
+                f"{start_sec:.3f}",
+                "-i",
+                str(src),
+                "-t",
+                f"{duration:.3f}",
+                "-map",
+                "0:v:0?",
+                "-map",
+                "0:a:0?",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "20",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                str(tmp),
+            ]
+        )
+
+    if dst.exists():
+        dst.unlink()
+    tmp.replace(dst)
+
+    out_dur = probe_duration(dst)
+    return {
+        "path": str(dst),
+        "source": str(src),
+        "start_sec": start_sec,
+        "end_sec": end_sec,
+        "duration_sec": out_dur if out_dur > 0 else duration,
+        "copied": used_copy,
+    }
+
+
 def extract_audio_flac(video: Path, flac_out: Path) -> None:
     """
     Extract mono 16 kHz FLAC for Whisper — smaller than PCM WAV,
