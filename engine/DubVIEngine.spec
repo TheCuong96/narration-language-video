@@ -25,6 +25,15 @@ hiddenimports = [
     "huggingface_hub",
     "onnxruntime",
     "av",
+    # setuptools/pkg_resources (PyInstaller pyi_rth_pkgres) needs these at runtime
+    "appdirs",
+    "packaging",
+    "jaraco",
+    "jaraco.text",
+    "jaraco.functools",
+    "jaraco.context",
+    "more_itertools",
+    "platformdirs",
 ]
 
 # Collect heavier packages when available

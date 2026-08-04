@@ -152,8 +152,17 @@ fn spawn_streaming(
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
         .env_clear()
-        .envs(env)
-        .current_dir(repo_engine_dir());
+        .envs(env);
+    // Prefer live engine source in cargo builds; otherwise stay next to the app
+    // (CARGO_MANIFEST_DIR is baked at compile time and may not exist when installed).
+    let engine_src = repo_engine_dir();
+    if engine_src.is_dir() {
+        cmd.current_dir(&engine_src);
+    } else if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            cmd.current_dir(dir);
+        }
+    }
 
     #[cfg(windows)]
     {

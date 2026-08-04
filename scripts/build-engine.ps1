@@ -12,6 +12,8 @@ $OutBin = Join-Path $Root "desktop\src-tauri\binaries"
 Set-Location $Engine
 python -m pip install --upgrade pip
 python -m pip install -r requirements-base.txt pyinstaller
+# Required by setuptools pkg_resources inside the frozen exe (pyi_rth_pkgres)
+python -m pip install "appdirs>=1.4.4" "packaging>=24" "jaraco.text>=3.11" "more-itertools>=10" "platformdirs>=4"
 
 if (Test-Path $Dist) { Remove-Item -Recurse -Force $Dist }
 python -m PyInstaller --noconfirm DubVIEngine.spec

@@ -348,8 +348,7 @@ export function computeProgressEta(input: {
     fileTotalEstSec = Math.round(seed.fileRemain / Math.max(0.01, 1 - doneFrac));
   }
 
-  const order = STAGE_LEGEND.map((s) => s.key);
-  const activeIdx = order.indexOf(stageKey);
+  const activeIdx = STAGE_LEGEND.findIndex((s) => s.key === stageKey);
   const legend: StageLegendEta[] = STAGE_LEGEND.map((s, i) => {
     const estSec =
       fileTotalEstSec != null

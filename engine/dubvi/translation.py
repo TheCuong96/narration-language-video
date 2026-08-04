@@ -15,12 +15,17 @@ log = get_logger("dubvi.translation")
 
 
 def protect_terms(text: str, terms: list[str]) -> tuple[str, dict[str, str]]:
+    """Replace protected terms with placeholders Google Translate won't reject.
+
+    Avoid tokens like ``XTERM13X`` — Google with ``source=en`` often returns
+    \"No translation was found\" for those. ``{{T0}}`` style is stable.
+    """
     mapping: dict[str, str] = {}
     out = text
     for i, term in enumerate(terms):
         pattern = re.compile(re.escape(term), re.IGNORECASE)
         if pattern.search(out):
-            token = f"XTERM{i}X"
+            token = f"{{{{T{i}}}}}"
             mapping[token] = term
             out = pattern.sub(token, out)
     return out, mapping
@@ -30,6 +35,16 @@ def restore_terms(text: str, mapping: dict[str, str]) -> str:
     out = text
     for token, term in mapping.items():
         out = re.sub(re.escape(token), term, out, flags=re.IGNORECASE)
+        # Google sometimes strips one layer of braces: {T0} instead of {{T0}}
+        loose = token.replace("{{", "{").replace("}}", "}")
+        if loose != token:
+            out = re.sub(re.escape(loose), term, out, flags=re.IGNORECASE)
+    # Legacy placeholders from older builds / cached protected text
+    for token, term in list(mapping.items()):
+        m = re.fullmatch(r"\{\{T(\d+)\}\}", token)
+        if m:
+            legacy = f"XTERM{m.group(1)}X"
+            out = re.sub(re.escape(legacy), term, out, flags=re.IGNORECASE)
     replacements = {
         r"\bPlayed\b": "Plaid",
         r"\bAppRide\b": "Appwrite",
@@ -53,10 +68,11 @@ def translate_with_backoff(
     *,
     source: str,
     target: str,
-    max_attempts: int = 5,
-    base_delay: float = 1.0,
+    max_attempts: int = 3,
+    base_delay: float = 0.8,
 ) -> str:
     last_err: Exception | None = None
+    # Provider already tries multiple backends; keep outer retries short.
     attempts = max_attempts if getattr(provider, "requires_internet", True) else min(2, max_attempts)
     for attempt in range(attempts):
         try:
@@ -132,11 +148,16 @@ def translate_segments(
                 vi = translate_with_backoff(
                     translator, protected, source=src, target=target_lang
                 )
-            except EngineError:
-                raise
+                vi = restore_terms(vi or s.text_en, mapping)
             except Exception as e:
-                raise EngineError(ErrorCode.TRANSLATE_FAILED, str(e)) from e
-            vi = restore_terms(vi or s.text_en, mapping)
+                # Free web translators flake often; one segment must not kill the job.
+                # Fall back to English (still narratable) and continue.
+                log.warning("segment %s translate failed, keep EN: %s", s.id, e)
+                events.log(
+                    f"Cảnh báo: không dịch được đoạn {s.id}, giữ tiếng Anh — {e}",
+                    level="warn",
+                )
+                vi = s.text_en
             result.append(
                 Segment(
                     id=s.id,

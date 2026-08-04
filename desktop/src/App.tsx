@@ -649,7 +649,7 @@ export default function App() {
       setCloneStart("0");
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      setErr({
+      setErrFriendly({
         title: "Không clone được đoạn video",
         body: msg,
       });
