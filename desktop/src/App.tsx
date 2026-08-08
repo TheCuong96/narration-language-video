@@ -85,6 +85,27 @@ const defaultSettings: AppSettings = {
   xtts_speaker_wav: "",
 };
 
+const LS_OUTPUT_DIR = "dubvi.default_output_dir";
+const LS_DOWNLOAD_DIR = "dubvi.default_download_dir";
+
+function readLocalDir(key: string): string {
+  try {
+    return localStorage.getItem(key) || "";
+  } catch {
+    return "";
+  }
+}
+
+function writeLocalDir(key: string, dir: string) {
+  try {
+    const trimmed = dir.trim();
+    if (trimmed) localStorage.setItem(key, trimmed);
+    else localStorage.removeItem(key);
+  } catch {
+    /* private mode / unavailable */
+  }
+}
+
 function friendlyLine(ev: EngineEvent): { text: string; cls?: string } {
   switch (ev.type) {
     case "stage":
@@ -112,7 +133,7 @@ export default function App() {
   const [page, setPage] = useState<Page>("dub");
   const [files, setFiles] = useState<string[]>([]);
   const [queue, setQueue] = useState<QueueItem[]>([]);
-  const [outputDir, setOutputDir] = useState("");
+  const [outputDir, setOutputDir] = useState(() => readLocalDir(LS_OUTPUT_DIR));
   const [voice, setVoice] = useState(defaultSettings.voice);
   const [model, setModel] = useState(defaultSettings.whisper_model);
   const [audioMode, setAudioMode] = useState<AudioMode>("vi_only");
@@ -146,14 +167,18 @@ export default function App() {
   const [errOpen, setErrOpen] = useState(false);
   const [errFriendly, setErrFriendly] = useState<FriendlyError | null>(null);
   const [errTech, setErrTech] = useState("");
-  const [settings, setSettings] = useState<AppSettings>(defaultSettings);
+  const [settings, setSettings] = useState<AppSettings>(() => ({
+    ...defaultSettings,
+    default_output_dir: readLocalDir(LS_OUTPUT_DIR),
+    default_download_dir: readLocalDir(LS_DOWNLOAD_DIR),
+  }));
   const [models, setModels] = useState<WhisperModelInfo[]>([]);
   const [xttsSpeakers, setXttsSpeakers] = useState<XttsSpeakerOption[]>([]);
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [downloadPct, setDownloadPct] = useState(0);
   const [urlInput, setUrlInput] = useState("");
-  const [downloadDir, setDownloadDir] = useState("");
+  const [downloadDir, setDownloadDir] = useState(() => readLocalDir(LS_DOWNLOAD_DIR));
   const [urlHelp, setUrlHelp] = useState<UrlHelpInfo | null>(null);
   const [downloadingUrl, setDownloadingUrl] = useState(false);
   const [lastUrlDownload, setLastUrlDownload] = useState<UrlDownloadNotice | null>(
@@ -169,6 +194,8 @@ export default function App() {
   const urlDownloadedPathsRef = useRef<Set<string>>(new Set());
   /** Debounce writing remembered dirs into settings.json. */
   const dirPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Avoid saving defaults over disk before getSettings finishes. */
+  const settingsHydratedRef = useRef(false);
   const busyRef = useRef(false);
   const jobIdRef = useRef<string | null>(null);
   /** Files dropped while startJob is in-flight (busy but jobId not ready yet). */
@@ -215,8 +242,13 @@ export default function App() {
   const rememberDir = useCallback(
     (kind: "output" | "download", dir: string, opts?: { immediate?: boolean }) => {
       const trimmed = dir.trim();
-      if (kind === "output") setOutputDir(dir);
-      else setDownloadDir(dir);
+      if (kind === "output") {
+        setOutputDir(dir);
+        writeLocalDir(LS_OUTPUT_DIR, trimmed);
+      } else {
+        setDownloadDir(dir);
+        writeLocalDir(LS_DOWNLOAD_DIR, trimmed);
+      }
 
       setSettings((prev) => {
         const next: AppSettings = {
@@ -225,6 +257,8 @@ export default function App() {
             ? { default_output_dir: trimmed }
             : { default_download_dir: trimmed }),
         };
+        // Don't overwrite settings.json with defaults before initial load finishes.
+        if (!settingsHydratedRef.current) return next;
         if (dirPersistTimerRef.current) {
           clearTimeout(dirPersistTimerRef.current);
           dirPersistTimerRef.current = null;
@@ -443,17 +477,52 @@ export default function App() {
     (async () => {
       try {
         const s = await getSettings();
-        setSettings({ ...defaultSettings, ...s });
-        setModel(s.whisper_model);
-        setVoice(s.voice);
-        setAudioMode(s.audio_mode);
-        setMixDb(s.mix_original_db);
-        setReview(s.review_by_default);
-        setPreferGpu(s.device_mode === "auto");
-        if (s.default_output_dir) setOutputDir(s.default_output_dir);
-        if (s.default_download_dir) setDownloadDir(s.default_download_dir);
-      } catch {
-        /* browser preview */
+        const merged: AppSettings = { ...defaultSettings, ...s };
+        setSettings(merged);
+        setModel(merged.whisper_model);
+        setVoice(merged.voice);
+        setAudioMode(merged.audio_mode);
+        setMixDb(merged.mix_original_db);
+        setReview(merged.review_by_default);
+        setPreferGpu(merged.device_mode === "auto");
+        const out = (merged.default_output_dir || "").trim();
+        const dl = (merged.default_download_dir || "").trim();
+        const localOut = readLocalDir(LS_OUTPUT_DIR);
+        const localDl = readLocalDir(LS_DOWNLOAD_DIR);
+        // Prefer disk; if disk empty, keep localStorage and heal settings.json.
+        let heal: Partial<AppSettings> | null = null;
+        if (out) {
+          setOutputDir(out);
+          writeLocalDir(LS_OUTPUT_DIR, out);
+        } else if (localOut) {
+          setOutputDir(localOut);
+          merged.default_output_dir = localOut;
+          heal = { ...(heal || {}), default_output_dir: localOut };
+        }
+        if (dl) {
+          setDownloadDir(dl);
+          writeLocalDir(LS_DOWNLOAD_DIR, dl);
+        } else if (localDl) {
+          setDownloadDir(localDl);
+          merged.default_download_dir = localDl;
+          heal = { ...(heal || {}), default_download_dir: localDl };
+        } else {
+          setDownloadDir("");
+          writeLocalDir(LS_DOWNLOAD_DIR, "");
+        }
+        if (heal) {
+          setSettings(merged);
+          void saveSettings({ ...merged, ...heal }).catch(() => {
+            /* best-effort heal */
+          });
+        }
+      } catch (e) {
+        pushLog({
+          text: `Không tải được cài đặt đã lưu: ${e}`,
+          cls: "warn",
+        });
+      } finally {
+        settingsHydratedRef.current = true;
       }
       try {
         setModels(await listModels());
@@ -471,7 +540,13 @@ export default function App() {
         /* browser preview / engine missing */
       }
     })();
-  }, []);
+    return () => {
+      if (dirPersistTimerRef.current) {
+        clearTimeout(dirPersistTimerRef.current);
+        dirPersistTimerRef.current = null;
+      }
+    };
+  }, [pushLog]);
 
   async function addFiles(paths: string[], opts?: { fromUrl?: boolean }) {
     if (!paths.length) return null;
@@ -1285,10 +1360,12 @@ export default function App() {
               setMixDb(settings.mix_original_db);
               setReview(settings.review_by_default);
               setPreferGpu(settings.device_mode === "auto");
-              if (settings.default_output_dir) setOutputDir(settings.default_output_dir);
-              if (settings.default_download_dir !== undefined) {
-                setDownloadDir(settings.default_download_dir || "");
-              }
+              const out = (settings.default_output_dir || "").trim();
+              const dl = (settings.default_download_dir || "").trim();
+              setOutputDir(out);
+              setDownloadDir(dl);
+              writeLocalDir(LS_OUTPUT_DIR, out);
+              writeLocalDir(LS_DOWNLOAD_DIR, dl);
               pushLog({ text: "Đã lưu cài đặt" });
             } catch (e) {
               pushLog({ text: String(e), cls: "error" });

@@ -305,7 +305,7 @@ pub async fn start_job(
     Ok(job_id)
 }
 
-fn write_cancel_flag(job_id: &str) -> Result<(), String> {
+fn appdata_root() -> PathBuf {
     let base = if cfg!(windows) {
         std::env::var("LOCALAPPDATA").unwrap_or_else(|_| {
             format!(
@@ -319,7 +319,54 @@ fn write_cancel_flag(job_id: &str) -> Result<(), String> {
             std::env::var("HOME").unwrap_or_else(|_| ".".into())
         )
     };
-    let dir = PathBuf::from(base).join("DubVI").join("jobs").join(job_id);
+    PathBuf::from(base).join("DubVI")
+}
+
+fn settings_path() -> PathBuf {
+    appdata_root().join("settings.json")
+}
+
+fn default_settings_json() -> Value {
+    serde_json::json!({
+        "whisper_model": "small",
+        "device_mode": "cpu",
+        "default_output_dir": "",
+        "default_download_dir": "",
+        "cleanup_temps": true,
+        "mix_original_db": -18.0,
+        "voice": "vi-VN-HoaiMyNeural",
+        "audio_mode": "vi_only",
+        "review_by_default": false,
+        "translate_provider": "deep-translator",
+        "tts_provider": "edge-tts",
+        "xtts_speaker_wav": "",
+    })
+}
+
+/// Read `%LOCALAPPDATA%/DubVI/settings.json` without spawning the Python engine.
+pub fn load_settings() -> Result<Value, String> {
+    let mut out = default_settings_json();
+    let path = settings_path();
+    if !path.is_file() {
+        return Ok(out);
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("read settings: {e}"))?;
+    if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&text) {
+        if let Value::Object(ref mut base) = out {
+            for (k, v) in map {
+                base.insert(k, v);
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub async fn get_settings() -> Result<Value, String> {
+    load_settings()
+}
+
+fn write_cancel_flag(job_id: &str) -> Result<(), String> {
+    let dir = appdata_root().join("jobs").join(job_id);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("cancel.flag"), "1").map_err(|e| e.to_string())?;
     Ok(())
@@ -526,16 +573,22 @@ pub async fn download_url(
     Ok(job_id)
 }
 
+/// Merge + write `%LOCALAPPDATA%/DubVI/settings.json` without spawning the engine.
 pub async fn save_settings(settings: Value) -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("dubvi-settings-{}.json", uuid::Uuid::new_v4()));
-    {
-        let mut f = std::fs::File::create(&dir).map_err(|e| e.to_string())?;
-        f.write_all(settings.to_string().as_bytes())
-            .map_err(|e| e.to_string())?;
+    let mut cur = load_settings()?;
+    if let (Value::Object(ref mut base), Value::Object(patch)) = (&mut cur, settings) {
+        for (k, v) in patch {
+            base.insert(k, v);
+        }
+    } else {
+        return Err("settings payload must be a JSON object".into());
     }
-    let path = dir.to_string_lossy().to_string();
-    let _ = run_engine_capture(&["settings-set", "--file", &path])?;
-    let _ = std::fs::remove_file(dir);
+    let path = settings_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create settings dir: {e}"))?;
+    }
+    let text = serde_json::to_string_pretty(&cur).map_err(|e| format!("serialize settings: {e}"))?;
+    std::fs::write(&path, text).map_err(|e| format!("write settings: {e}"))?;
     Ok(())
 }
 

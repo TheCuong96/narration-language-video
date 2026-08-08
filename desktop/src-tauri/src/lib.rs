@@ -237,7 +237,7 @@ async fn delete_model(model_id: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn get_settings() -> Result<Value, String> {
-    engine::run_engine_json(&["settings-get"]).await
+    engine::get_settings().await
 }
 
 #[tauri::command]
