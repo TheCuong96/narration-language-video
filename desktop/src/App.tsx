@@ -171,6 +171,9 @@ export default function App() {
   const dirPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const busyRef = useRef(false);
   const jobIdRef = useRef<string | null>(null);
+  /** Files dropped while startJob is in-flight (busy but jobId not ready yet). */
+  const pendingEnqueueRef = useRef<string[]>([]);
+  const onEngineEventRef = useRef<(ev: EngineEvent) => void>(() => {});
   busyRef.current = busy;
   jobIdRef.current = jobId;
 
@@ -350,6 +353,34 @@ export default function App() {
         setFileProgress((p) => ({ ...p, percent: 100, message: "Hoàn tất" }));
         setStageLabel("Hoàn tất");
         setCanResume(false);
+        // Mid-run appends that landed after the engine decided to finish.
+        const finishedId = jobIdRef.current;
+        if (finishedId) {
+          window.setTimeout(() => {
+            void (async () => {
+              if (busyRef.current || jobIdRef.current !== finishedId) return;
+              try {
+                const q = await getQueue(finishedId);
+                const hasPending = (q.items || []).some(
+                  (i) => i.status === "pending",
+                );
+                if (!hasPending) return;
+                pushLog({
+                  text: "Còn video chờ trong hàng đợi — tự tiếp tục xử lý…",
+                });
+                setBusy(true);
+                sawTerminalRef.current = false;
+                userStoppedRef.current = false;
+                setCanResume(false);
+                setStageLabel("Đang tiếp tục hàng đợi vừa thêm…");
+                await resumeJob(finishedId, (e) => onEngineEventRef.current(e));
+              } catch (e) {
+                setBusy(false);
+                pushLog({ text: String(e), cls: "warn" });
+              }
+            })();
+          }, 400);
+        }
       }
       if (ev.type === "review_ready" && ev.stem && ev.segments) {
         setReviewStem(ev.stem);
@@ -406,6 +437,7 @@ export default function App() {
     },
     [pushLog, downloading],
   );
+  onEngineEventRef.current = onEngineEvent;
 
   useEffect(() => {
     (async () => {
@@ -456,6 +488,16 @@ export default function App() {
       setCloneSource(paths[0]);
     }
 
+    // Busy but startJob has not returned jobId yet — buffer for flush after start.
+    if (busyRef.current && !jobIdRef.current && fresh.length) {
+      pendingEnqueueRef.current = Array.from(
+        new Set([...pendingEnqueueRef.current, ...fresh]),
+      );
+      pushLog({
+        text: `Đã xếp ${fresh.length} video — sẽ thêm vào hàng đợi ngay khi job sẵn sàng`,
+      });
+    }
+
     // While a dub job is running: append to engine queue (auto-process next).
     const liveJobId = busyRef.current ? jobIdRef.current : null;
     if (liveJobId && fresh.length) {
@@ -497,18 +539,26 @@ export default function App() {
           }));
         }
         // Race: job finished between click and enqueue — resume pending items.
-        if (!busyRef.current) {
+        const maybeResume = async () => {
+          if (busyRef.current || !added.length) return;
           pushLog({ text: "Job vừa xong — tự tiếp tục hàng đợi mới thêm…" });
           setBusy(true);
           sawTerminalRef.current = false;
           userStoppedRef.current = false;
           setCanResume(false);
           try {
-            await resumeJob(liveJobId, onEngineEvent);
+            await resumeJob(liveJobId, (e) => onEngineEventRef.current(e));
           } catch (e) {
             setBusy(false);
             pushLog({ text: String(e), cls: "error" });
           }
+        };
+        await maybeResume();
+        // Also re-check shortly after — covers "still busy during enqueue, then exits".
+        if (added.length) {
+          window.setTimeout(() => {
+            void maybeResume();
+          }, 600);
         }
         return null;
       } catch (e) {
@@ -862,9 +912,49 @@ export default function App() {
         onEngineEvent,
       );
       setJobId(id);
+      jobIdRef.current = id;
       setStageLabel("Đang xử lý tuần tự…");
+      // Flush videos added while startJob was in-flight.
+      const buffered = Array.from(new Set(pendingEnqueueRef.current));
+      pendingEnqueueRef.current = [];
+      const already = new Set(files);
+      const toEnqueue = buffered.filter((p) => !already.has(p));
+      if (toEnqueue.length) {
+        try {
+          const result = await enqueueVideos(id, toEnqueue);
+          const n = result.added_count ?? result.added?.length ?? 0;
+          pushLog({
+            text: `Đã thêm ${n} video (xếp lúc khởi động) vào hàng đợi — sẽ chạy tự động`,
+          });
+          if (result.queue?.items?.length) {
+            setQueue((prev) => {
+              const meta = new Map(prev.map((p) => [p.stem, p]));
+              return result.queue!.items.map((it) => {
+                const prevItem = meta.get(it.stem);
+                return {
+                  ...it,
+                  duration_label: prevItem?.duration_label,
+                  size_label: prevItem?.size_label,
+                  duration_sec: prevItem?.duration_sec,
+                  size_bytes: prevItem?.size_bytes,
+                  from_url:
+                    Boolean(prevItem?.from_url) ||
+                    urlDownloadedPathsRef.current.has(it.input),
+                };
+              });
+            });
+            setOverallProgress((p) => ({
+              ...p,
+              fileTotal: result.queue!.items.length,
+            }));
+          }
+        } catch (e) {
+          pushLog({ text: String(e), cls: "warn" });
+        }
+      }
     } catch (e) {
       setBusy(false);
+      pendingEnqueueRef.current = [];
       setErrFriendly({ title: "Không bắt đầu được", body: String(e) });
       setErrTech(String(e));
       setErrOpen(true);

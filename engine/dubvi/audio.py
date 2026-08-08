@@ -151,6 +151,15 @@ def build_narration(
     narration = work / cache.NARRATION
     if narration.exists() and narration.stat().st_size > 0:
         events.log("Dùng cache narration.wav")
+        # Older cache may still be longer than the video — fit before mux.
+        narr_dur = probe_duration(narration)
+        if narr_dur > video_duration + 0.05 and video_duration > 0.05:
+            tempo = narr_dur / video_duration
+            events.log(
+                f"Cache narration dài hơn video ({narr_dur:.1f}s > {video_duration:.1f}s) — "
+                f"tăng tốc {tempo:.2f}× để giữ đủ nội dung"
+            )
+            fit_audio_to_duration(narration, narration, video_duration)
         return narration
 
     fitted_dir = work / cache.FITTED_DIR

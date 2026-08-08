@@ -434,13 +434,14 @@ def run_job(cfg: JobConfig) -> int:
         also_stems = list(cfg.retry_stems or [])
 
         while True:
-            item = queue.next_work_item(jid, also_stems=also_stems)
+            item = queue.next_work_item(
+                jid,
+                also_stems=also_stems,
+                exclude_stems=processed_this_run,
+            )
             if item is None:
                 break
             stem = str(item.get("stem") or "")
-            if stem in processed_this_run:
-                log.warning("queue item %s still eligible after process — stop loop", stem)
-                break
             processed_this_run.add(stem)
 
             video = Path(str(item["input"]))
@@ -522,9 +523,8 @@ def run_job(cfg: JobConfig) -> int:
                 failed.append(video.name)
                 events.queue_updated(queue.load_queue(jid) or {})
 
-            # Review pause stops the run; remaining pending (incl. appends) wait for continue.
-            if review_paused:
-                break
+            # Keep looping so other videos can still reach review / finish.
+            # Mid-run appends stay pending until this run ends or they are picked up.
 
         if review_paused and not failed:
             update_job_state(jid, status="review", review_stems=review_paused)

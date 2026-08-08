@@ -102,3 +102,27 @@ def test_next_work_item_resume_stems(monkeypatch, tmp_path: Path):
     nxt = queue.next_work_item(job_id, also_stems=["x"])
     assert nxt is not None
     assert nxt["stem"] == "x"
+
+
+def test_next_work_item_skips_already_attempted_failed(monkeypatch, tmp_path: Path):
+    """A stem that failed again must not block later resume stems."""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    job_id = "appendjob05"
+    job_dir(job_id)
+    vids = _touch_videos(tmp_path, ["a.mp4", "b.mp4"])
+    out = tmp_path / "out"
+    out.mkdir()
+    queue.init_queue(job_id, vids, out)
+    queue.update_item(job_id, "a", status=QueueItemStatus.FAILED)
+    queue.update_item(job_id, "b", status=QueueItemStatus.FAILED)
+
+    first = queue.next_work_item(job_id, also_stems=["a", "b"])
+    assert first is not None and first["stem"] == "a"
+
+    # After attempting a (still failed), exclude it so b can run.
+    second = queue.next_work_item(
+        job_id, also_stems=["a", "b"], exclude_stems={"a"}
+    )
+    assert second is not None and second["stem"] == "b"

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .models import VIDEO_EXTENSIONS, ErrorCode, QueueItemStatus
 from .system_info import EngineError, get_logger, job_dir
@@ -13,6 +15,7 @@ from .system_info import EngineError, get_logger, job_dir
 log = get_logger("dubvi.queue")
 
 QUEUE_FILE = "queue.json"
+QUEUE_LOCK = "queue.lock"
 
 
 def is_video_file(path: Path) -> bool:
@@ -92,6 +95,52 @@ def output_path_for(video: Path, output_dir: Path) -> Path:
     return output_dir / f"{video.stem}{suffix}"
 
 
+@contextmanager
+def _queue_lock(job_id: str, timeout: float = 8.0) -> Iterator[None]:
+    """Serialize queue.json read-modify-write (UI append vs pipeline update)."""
+    root = job_dir(job_id)
+    root.mkdir(parents=True, exist_ok=True)
+    lock_path = root / QUEUE_LOCK
+    fh = open(lock_path, "a+b")
+    start = time.time()
+    locked = False
+    try:
+        while True:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except OSError:
+                if time.time() - start >= timeout:
+                    log.warning("queue lock timeout job=%s — continuing unlocked", job_id)
+                    break
+                time.sleep(0.04)
+        yield
+    finally:
+        if locked:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        fh.close()
+
+
 def load_queue(job_id: str) -> dict[str, Any] | None:
     path = job_dir(job_id) / QUEUE_FILE
     if not path.exists():
@@ -110,23 +159,24 @@ def save_queue(job_id: str, data: dict[str, Any]) -> Path:
 
 
 def init_queue(job_id: str, videos: list[Path], output_dir: Path) -> dict[str, Any]:
-    items = []
-    for i, v in enumerate(videos):
-        out = output_path_for(v, output_dir)
-        items.append(
-            {
-                "index": i,
-                "input": str(v),
-                "output": str(out),
-                "stem": v.stem,
-                "status": QueueItemStatus.PENDING.value,
-                "error": None,
-                "code": None,
-            }
-        )
-    data = {"job_id": job_id, "items": items, "created_at": time.time()}
-    save_queue(job_id, data)
-    return data
+    with _queue_lock(job_id):
+        items = []
+        for i, v in enumerate(videos):
+            out = output_path_for(v, output_dir)
+            items.append(
+                {
+                    "index": i,
+                    "input": str(v),
+                    "output": str(out),
+                    "stem": v.stem,
+                    "status": QueueItemStatus.PENDING.value,
+                    "error": None,
+                    "code": None,
+                }
+            )
+        data = {"job_id": job_id, "items": items, "created_at": time.time()}
+        save_queue(job_id, data)
+        return data
 
 
 def update_item(
@@ -138,20 +188,21 @@ def update_item(
     code: str | None = None,
     output: str | None = None,
 ) -> dict[str, Any]:
-    data = load_queue(job_id) or {"job_id": job_id, "items": []}
-    st = status.value if isinstance(status, QueueItemStatus) else status
-    for item in data["items"]:
-        if item["stem"] == stem:
-            item["status"] = st
-            if error is not None:
-                item["error"] = error
-            if code is not None:
-                item["code"] = code
-            if output is not None:
-                item["output"] = output
-            break
-    save_queue(job_id, data)
-    return data
+    with _queue_lock(job_id):
+        data = load_queue(job_id) or {"job_id": job_id, "items": []}
+        st = status.value if isinstance(status, QueueItemStatus) else status
+        for item in data["items"]:
+            if item["stem"] == stem:
+                item["status"] = st
+                if error is not None:
+                    item["error"] = error
+                if code is not None:
+                    item["code"] = code
+                if output is not None:
+                    item["output"] = output
+                break
+        save_queue(job_id, data)
+        return data
 
 
 def failed_stems(job_id: str) -> list[str]:
@@ -194,17 +245,18 @@ def resumable_stems(job_id: str) -> list[str]:
 
 def mark_active_cancelled(job_id: str) -> dict[str, Any] | None:
     """Mark running items as cancelled so UI/resume can continue them."""
-    data = load_queue(job_id)
-    if not data:
-        return None
-    changed = False
-    for item in data["items"]:
-        if item.get("status") == QueueItemStatus.RUNNING.value:
-            item["status"] = QueueItemStatus.CANCELLED.value
-            changed = True
-    if changed:
-        save_queue(job_id, data)
-    return data
+    with _queue_lock(job_id):
+        data = load_queue(job_id)
+        if not data:
+            return None
+        changed = False
+        for item in data["items"]:
+            if item.get("status") == QueueItemStatus.RUNNING.value:
+                item["status"] = QueueItemStatus.CANCELLED.value
+                changed = True
+        if changed:
+            save_queue(job_id, data)
+        return data
 
 
 def append_videos(
@@ -217,90 +269,98 @@ def append_videos(
     Skips paths already in the queue. Rejects duplicate stems (work-dir clash).
     Returns (queue_data, newly_added_paths).
     """
-    data = load_queue(job_id) or {
-        "job_id": job_id,
-        "items": [],
-        "created_at": time.time(),
-    }
-    items: list[dict[str, Any]] = list(data.get("items") or [])
-    existing_paths = set()
-    existing_stems = set()
-    for it in items:
-        raw = it.get("input") or ""
-        try:
-            existing_paths.add(str(Path(raw).expanduser().resolve()).lower())
-        except OSError:
-            existing_paths.add(str(raw).lower())
-        existing_stems.add(str(it.get("stem") or "").lower())
+    with _queue_lock(job_id):
+        data = load_queue(job_id) or {
+            "job_id": job_id,
+            "items": [],
+            "created_at": time.time(),
+        }
+        items: list[dict[str, Any]] = list(data.get("items") or [])
+        existing_paths = set()
+        existing_stems = set()
+        for it in items:
+            raw = it.get("input") or ""
+            try:
+                existing_paths.add(str(Path(raw).expanduser().resolve()).lower())
+            except OSError:
+                existing_paths.add(str(raw).lower())
+            existing_stems.add(str(it.get("stem") or "").lower())
 
-    added: list[Path] = []
-    for v in videos:
-        try:
-            rp = v.expanduser().resolve()
-        except OSError as e:
-            raise EngineError(ErrorCode.INPUT_NOT_FOUND, f"Đường dẫn không hợp lệ: {v}") from e
-        if not is_video_file(rp):
-            raise EngineError(
-                ErrorCode.UNSUPPORTED_FORMAT,
-                f"Định dạng không hỗ trợ hoặc không phải video: {rp.name}",
+        added: list[Path] = []
+        for v in videos:
+            try:
+                rp = v.expanduser().resolve()
+            except OSError as e:
+                raise EngineError(
+                    ErrorCode.INPUT_NOT_FOUND, f"Đường dẫn không hợp lệ: {v}"
+                ) from e
+            if not is_video_file(rp):
+                raise EngineError(
+                    ErrorCode.UNSUPPORTED_FORMAT,
+                    f"Định dạng không hỗ trợ hoặc không phải video: {rp.name}",
+                )
+            key = str(rp).lower()
+            if key in existing_paths:
+                continue
+            stem = rp.stem
+            if stem.lower() in existing_stems:
+                raise EngineError(
+                    ErrorCode.UNSUPPORTED_FORMAT,
+                    f"Đã có video cùng tên «{stem}» trong hàng đợi — đổi tên file rồi thêm lại.",
+                )
+            out = output_path_for(rp, output_dir)
+            items.append(
+                {
+                    "index": len(items),
+                    "input": str(rp),
+                    "output": str(out),
+                    "stem": stem,
+                    "status": QueueItemStatus.PENDING.value,
+                    "error": None,
+                    "code": None,
+                }
             )
-        key = str(rp).lower()
-        if key in existing_paths:
-            continue
-        stem = rp.stem
-        if stem.lower() in existing_stems:
-            raise EngineError(
-                ErrorCode.UNSUPPORTED_FORMAT,
-                f"Đã có video cùng tên «{stem}» trong hàng đợi — đổi tên file rồi thêm lại.",
-            )
-        out = output_path_for(rp, output_dir)
-        items.append(
-            {
-                "index": len(items),
-                "input": str(rp),
-                "output": str(out),
-                "stem": stem,
-                "status": QueueItemStatus.PENDING.value,
-                "error": None,
-                "code": None,
-            }
-        )
-        existing_paths.add(key)
-        existing_stems.add(stem.lower())
-        added.append(rp)
+            existing_paths.add(key)
+            existing_stems.add(stem.lower())
+            added.append(rp)
 
-    # Re-index for stable UI ordering
-    for i, it in enumerate(items):
-        it["index"] = i
-    data["items"] = items
-    data["job_id"] = job_id
-    save_queue(job_id, data)
-    return data, added
+        for i, it in enumerate(items):
+            it["index"] = i
+        data["items"] = items
+        data["job_id"] = job_id
+        save_queue(job_id, data)
+        return data, added
 
 
 def next_work_item(
     job_id: str,
     *,
     also_stems: list[str] | None = None,
+    exclude_stems: set[str] | None = None,
 ) -> dict[str, Any] | None:
     """
     Next queue item to process for a live/resume job.
 
     Always picks pending items (including videos appended mid-run).
     Also picks cancelled/failed/running stems listed in also_stems (resume/retry).
+    exclude_stems skips items already attempted in the current process loop
+    (so a re-failed stem does not block the rest of the queue).
     """
     data = load_queue(job_id)
     if not data:
         return None
     also = {s.lower() for s in (also_stems or [])}
+    skip = {s.lower() for s in (exclude_stems or set())}
     resume_statuses = {
         QueueItemStatus.CANCELLED.value,
         QueueItemStatus.FAILED.value,
         QueueItemStatus.RUNNING.value,
     }
     for item in data.get("items") or []:
-        st = item.get("status")
         stem = str(item.get("stem") or "")
+        if stem.lower() in skip:
+            continue
+        st = item.get("status")
         if st == QueueItemStatus.PENDING.value:
             return item
         if stem.lower() in also and st in resume_statuses:
