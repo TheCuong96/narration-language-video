@@ -8,6 +8,7 @@ from . import cache, events
 from .ffmpeg import (
     concat_wavs,
     extract_audio_flac,
+    fit_audio_to_duration,
     make_silence,
     mux_video,
     probe_duration,
@@ -143,7 +144,9 @@ def build_narration(
 
     Prefer natural speaking rate: borrow silence gaps to give long Vietnamese
     lines more room, then apply only mild atempo (≤ ~1.20×). Remaining overflow
-    still spills into following gaps (no hard trim).
+    still spills into following gaps (no hard trim). If the finished timeline is
+    still longer than the video, speed up the whole narration so nothing is cut
+    off at mux time.
     """
     narration = work / cache.NARRATION
     if narration.exists() and narration.stat().st_size > 0:
@@ -254,6 +257,24 @@ def build_narration(
 
     list_file = work / "concat.txt"
     concat_wavs(pieces, list_file, narration)
+
+    # Final safety net: mux uses -shortest, so a longer narration would lose its
+    # tail. Speed up the full track (never hard-trim speech) to match the video.
+    narr_dur = probe_duration(narration)
+    if narr_dur > video_duration + 0.05 and video_duration > 0.05:
+        tempo = narr_dur / video_duration
+        events.log(
+            f"Giọng đọc dài hơn video ({narr_dur:.1f}s > {video_duration:.1f}s) — "
+            f"tăng tốc toàn bộ {tempo:.2f}× để giữ đủ nội dung"
+        )
+        if tracker:
+            tracker.emit(
+                max(total, 1),
+                max(total, 1),
+                f"Tăng tốc giọng đọc {tempo:.2f}× để khớp video",
+            )
+        fit_audio_to_duration(narration, narration, video_duration)
+
     if tracker:
         tracker.emit(max(total, 1), max(total, 1), "Đã căn thời gian")
     else:

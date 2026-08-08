@@ -305,6 +305,20 @@ def make_silence(dst: Path, duration_sec: float, *, sample_rate: int = 24000) ->
     )
 
 
+def atempo_filter_chain(tempo: float) -> list[str]:
+    """Build stacked atempo filters (each filter only accepts 0.5–2.0)."""
+    filters: list[str] = []
+    t = max(tempo, 1e-6)
+    while t < 0.5:
+        filters.append("atempo=0.5")
+        t /= 0.5
+    while t > 2.0:
+        filters.append("atempo=2.0")
+        t /= 2.0
+    filters.append(f"atempo={t:.4f}")
+    return filters
+
+
 def stretch_to_duration(
     src: Path,
     dst: Path,
@@ -337,15 +351,7 @@ def stretch_to_duration(
     tempo = dur / usable if usable > 0 else 1.0
     tempo = max(min_tempo, min(tempo, max_tempo))
 
-    filters: list[str] = []
-    t = tempo
-    while t < 0.5:
-        filters.append("atempo=0.5")
-        t /= 0.5
-    while t > 2.0:
-        filters.append("atempo=2.0")
-        t /= 2.0
-    filters.append(f"atempo={t:.4f}")
+    filters = atempo_filter_chain(tempo)
 
     sped_dur = dur / tempo
     if sped_dur <= target_sec + 0.02:
@@ -381,6 +387,89 @@ def stretch_to_duration(
     # Verify
     actual = probe_duration(dst)
     return actual if actual > 0 else out_dur
+
+
+def fit_audio_to_duration(
+    src: Path,
+    dst: Path,
+    target_sec: float,
+    *,
+    sample_rate: int = 24000,
+) -> float:
+    """
+    Time-stretch the whole clip so duration matches target_sec.
+
+    Unlike stretch_to_duration, this never hard-trims speech content: tempo is
+    raised/lowered as much as needed (via stacked atempo) so the full audio fits.
+    A final apad+atrim only corrects float error to an exact length.
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    target = max(float(target_sec), 0.05)
+    dur = probe_duration(src)
+    if dur <= 0:
+        make_silence(dst, target, sample_rate=sample_rate)
+        return target
+
+    # Already within tolerance — pad if slightly short, else copy as-is.
+    if abs(dur - target) <= 0.05:
+        if dur < target - 0.01:
+            run_ffmpeg(
+                [
+                    ffmpeg_path(),
+                    "-y",
+                    "-i",
+                    str(src),
+                    "-af",
+                    f"apad=whole_dur={target:.3f},atrim=0:{target:.3f}",
+                    "-ar",
+                    str(sample_rate),
+                    "-ac",
+                    "1",
+                    "-c:a",
+                    "pcm_s16le",
+                    str(dst),
+                ]
+            )
+            actual = probe_duration(dst)
+            return actual if actual > 0 else target
+        if src.resolve() != dst.resolve():
+            shutil.copy2(src, dst)
+        return dur
+
+    tempo = dur / target
+    filters = atempo_filter_chain(tempo)
+    # Nail exact length after speed change (tiny atrrim only for float drift).
+    af = ",".join(filters) + f",apad=whole_dur={target:.3f},atrim=0:{target:.3f}"
+
+    # Write via temp when in-place so FFmpeg never reads/writes the same file.
+    out = dst
+    tmp: Path | None = None
+    if src.resolve() == dst.resolve():
+        tmp = dst.with_name(dst.stem + ".__fit__.wav")
+        out = tmp
+
+    run_ffmpeg(
+        [
+            ffmpeg_path(),
+            "-y",
+            "-i",
+            str(src),
+            "-af",
+            af,
+            "-ar",
+            str(sample_rate),
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            str(out),
+        ]
+    )
+    if tmp is not None:
+        tmp.replace(dst)
+
+    actual = probe_duration(dst)
+    return actual if actual > 0 else target
 
 
 def concat_wavs(pieces: list[Path], list_file: Path, narration: Path) -> None:
