@@ -1,11 +1,5 @@
-import { useMemo, useState, type DragEvent, type MouseEvent } from "react";
-import type {
-  AudioMode,
-  QueueItem,
-  UrlDownloadNotice,
-  XttsSpeakerOption,
-} from "../lib/types";
-import type { UrlHelpInfo } from "../lib/engine";
+import { useMemo, type DragEvent, type MouseEvent } from "react";
+import type { AudioMode, QueueItem, XttsSpeakerOption } from "../lib/types";
 import { formatElapsed, useElapsed } from "../hooks/useElapsed";
 import { computeProgressEta } from "../lib/progressEta";
 
@@ -64,6 +58,7 @@ interface Props {
   xttsSpeakerWav: string;
   busy: boolean;
   canResume: boolean;
+  downloadingUrl: boolean;
   stageLabel: string;
   fileProgress: {
     current: number;
@@ -82,23 +77,12 @@ interface Props {
   elapsedSec: number;
   completedElapsedSec: number[];
   dragOver: boolean;
-  urlInput: string;
-  downloadDir: string;
-  urlHelp: UrlHelpInfo | null;
-  downloadingUrl: boolean;
-  lastUrlDownload: UrlDownloadNotice | null;
   onDragOver: (e: DragEvent) => void;
   onDragLeave: () => void;
   onDrop: (e: DragEvent) => void;
   onPickFiles: () => void;
   onPickOut: () => void;
-  onPickDownloadDir: () => void;
   onChangeOutput: (v: string) => void;
-  onChangeDownloadDir: (v: string) => void;
-  onChangeUrl: (v: string) => void;
-  onDownloadUrl: () => void;
-  onOpenDownloadFolder: () => void;
-  onDismissDownloadNotice: () => void;
   onVoice: (v: string) => void;
   onXttsSpeaker: (path: string) => void;
   onModel: (v: string) => void;
@@ -113,20 +97,10 @@ interface Props {
   onRetry: () => void;
   onOpenOut: () => void;
   onOpenReview: (stem: string) => void;
-  cloneSource: string;
-  cloneStart: string;
-  cloneEnd: string;
-  cloneName: string;
-  cloningSegment: boolean;
-  onCloneSource: (v: string) => void;
-  onCloneStart: (v: string) => void;
-  onCloneEnd: (v: string) => void;
-  onCloneName: (v: string) => void;
-  onCloneSegment: () => void;
-  onPickCloneSource: (path: string) => void;
+  onGoClone: (path: string) => void;
 }
 
-export function ProcessPage(props: Props) {
+export function DubPage(props: Props) {
   const {
     files,
     queue,
@@ -143,29 +117,19 @@ export function ProcessPage(props: Props) {
     xttsSpeakerWav,
     busy,
     canResume,
+    downloadingUrl,
     stageLabel,
     fileProgress,
     overallProgress,
     elapsedSec,
     completedElapsedSec,
     dragOver,
-    urlInput,
-    downloadDir,
-    urlHelp,
-    downloadingUrl,
-    lastUrlDownload,
     onDragOver,
     onDragLeave,
     onDrop,
     onPickFiles,
     onPickOut,
-    onPickDownloadDir,
     onChangeOutput,
-    onChangeDownloadDir,
-    onChangeUrl,
-    onDownloadUrl,
-    onOpenDownloadFolder,
-    onDismissDownloadNotice,
     onVoice,
     onXttsSpeaker,
     onModel,
@@ -180,20 +144,8 @@ export function ProcessPage(props: Props) {
     onRetry,
     onOpenOut,
     onOpenReview,
-    cloneSource,
-    cloneStart,
-    cloneEnd,
-    cloneName,
-    cloningSegment,
-    onCloneSource,
-    onCloneStart,
-    onCloneEnd,
-    onCloneName,
-    onCloneSegment,
-    onPickCloneSource,
+    onGoClone,
   } = props;
-
-  const [showUrlHelp, setShowUrlHelp] = useState(false);
 
   const fileLabel = useMemo(() => {
     if (!files.length) return "Chưa chọn video";
@@ -210,7 +162,6 @@ export function ProcessPage(props: Props) {
   const stageKey = fileProgress.stage || "";
   const fileIndex = overallProgress.fileIndex || 0;
   const settingsLocked = busy || downloadingUrl;
-  const cloneLocked = settingsLocked || cloningSegment;
   const hasCompletedResult =
     !busy &&
     !downloadingUrl &&
@@ -267,265 +218,24 @@ export function ProcessPage(props: Props) {
         {settingsLocked ? (
           <div className="drop-locked">
             {downloadingUrl
-              ? "Đang tải video từ URL…"
+              ? "Đang tải video từ URL ở tab khác…"
               : "Đang xử lý — không đổi video / thiết lập"}
           </div>
         ) : null}
       </div>
 
-      <section className={`panel url-panel ${settingsLocked ? "settings-locked" : ""}`}>
-        <h2>Tải từ liên kết (yt-dlp)</h2>
-        <p className="muted url-lead">
-          Dán URL video công khai → tải về máy → thêm vào hàng đợi thuyết minh tiếng Việt.
-        </p>
-        <div className="row url-row">
-          <label htmlFor="download-dir">Lưu vào</label>
-          <input
-            id="download-dir"
-            value={downloadDir}
-            onChange={(e) => onChangeDownloadDir(e.target.value)}
-            placeholder="Để trống = thư mục tạm của app (AppData\DubVI\downloads)"
-            disabled={settingsLocked}
-          />
-          <button type="button" onClick={onPickDownloadDir} disabled={settingsLocked}>
-            Chọn
-          </button>
-        </div>
-        <div className="row url-row">
-          <label htmlFor="video-url">URL</label>
-          <input
-            id="video-url"
-            value={urlInput}
-            onChange={(e) => onChangeUrl(e.target.value)}
-            placeholder="https://www.youtube.com/watch?v=…"
-            disabled={settingsLocked}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !settingsLocked) {
-                e.preventDefault();
-                onDownloadUrl();
-              }
-            }}
-          />
-          <button
-            type="button"
-            className="primary"
-            disabled={settingsLocked || !urlInput.trim()}
-            onClick={onDownloadUrl}
-          >
-            {downloadingUrl ? "Đang tải…" : "Tải về"}
-          </button>
-        </div>
-        <p className="muted url-dir-hint">
-          {downloadDir.trim()
-            ? `Video sẽ lưu vào: ${downloadDir.trim()}`
-            : "Chưa chọn thư mục — file sẽ vào thư mục tải tạm của Dub VI."}
-        </p>
-        {downloadingUrl ? (
-          <div className="url-status url-status-busy" role="status">
-            <strong>Đang tải về máy…</strong>
-            <span>Theo dõi thanh tiến độ bên dưới. Có thể bấm «Hủy tải».</span>
-          </div>
-        ) : null}
-        {lastUrlDownload && !downloadingUrl ? (
-          <div className="url-status url-status-ok" role="status">
-            <div className="url-status-head">
-              <strong>Đã tải video về máy</strong>
-              <button
-                type="button"
-                className="linkish url-status-dismiss"
-                onClick={onDismissDownloadNotice}
-              >
-                Đóng
-              </button>
-            </div>
-            <dl className="url-status-meta">
-              <div>
-                <dt>Tên file</dt>
-                <dd>{lastUrlDownload.fileName}</dd>
-              </div>
-              <div>
-                <dt>Thư mục</dt>
-                <dd className="path">{lastUrlDownload.folder}</dd>
-              </div>
-              <div>
-                <dt>Đường dẫn đầy đủ</dt>
-                <dd className="path">{lastUrlDownload.path}</dd>
-              </div>
-              {(lastUrlDownload.duration_label || lastUrlDownload.size_label) && (
-                <div>
-                  <dt>Thông tin</dt>
-                  <dd>
-                    {lastUrlDownload.duration_label || "—"}
-                    {" · "}
-                    {lastUrlDownload.size_label || "—"}
-                  </dd>
-                </div>
-              )}
-              <div>
-                <dt>URL nguồn</dt>
-                <dd className="path">{lastUrlDownload.sourceUrl}</dd>
-              </div>
-            </dl>
-            <div className="url-status-actions">
-              <button type="button" className="primary" onClick={onOpenDownloadFolder}>
-                Mở thư mục tải về
-              </button>
-              <span className="muted">
-                Mở Explorer để xem/phát thử file trước khi Bắt đầu thuyết minh.
-              </span>
-            </div>
-          </div>
-        ) : null}
-        <button
-          type="button"
-          className="linkish"
-          onClick={() => setShowUrlHelp((v) => !v)}
-          aria-expanded={showUrlHelp}
-        >
-          {showUrlHelp ? "Ẩn hướng dẫn video nào tải được" : "Video nào có thể tải về?"}
-        </button>
-        {showUrlHelp && (
-          <div className="url-help">
-            <p>{urlHelp?.summary || "Dùng yt-dlp để tải một video công khai từ http(s)."}</p>
-            <div className="url-help-cols">
-              <div>
-                <h3>Thường tải được</h3>
-                <ul>
-                  {(
-                    urlHelp?.typically_works || [
-                      "YouTube — video công khai",
-                      "Vimeo, Dailymotion và nhiều site trong yt-dlp",
-                      "Link file media trực tiếp (mp4/webm) nếu server cho phép",
-                    ]
-                  ).map((t) => (
-                    <li key={t}>{t}</li>
-                  ))}
-                </ul>
-              </div>
-              <div>
-                <h3>Thường không tải được</h3>
-                <ul>
-                  {(
-                    urlHelp?.often_fails_or_unsupported || [
-                      "Video riêng tư / trả phí / cần đăng nhập",
-                      "DRM (Netflix, Disney+…)",
-                      "Livestream đang phát; playlist cả kênh",
-                    ]
-                  ).map((t) => (
-                    <li key={t}>{t}</li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-            {urlHelp?.tips?.length ? (
-              <>
-                <h3>Mẹo</h3>
-                <ul>
-                  {urlHelp.tips.map((t) => (
-                    <li key={t}>{t}</li>
-                  ))}
-                </ul>
-              </>
-            ) : null}
-            <p className="url-help-foot">
-              Danh sách site đầy đủ của yt-dlp:{" "}
-              <a
-                href={
-                  urlHelp?.supported_sites_url ||
-                  "https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md"
-                }
-                target="_blank"
-                rel="noreferrer"
-              >
-                supportedsites.md
-              </a>
-              {urlHelp?.yt_dlp_version ? ` · yt-dlp ${urlHelp.yt_dlp_version}` : ""}
-            </p>
-          </div>
-        )}
-      </section>
-
-      <section className={`panel clone-panel ${cloneLocked ? "settings-locked" : ""}`}>
-        <h2>Clone đoạn video</h2>
-        <p className="muted url-lead">
-          Chọn video đã có, nhập khoảng thời gian → tạo file mới và thêm vào hàng đợi
-          thuyết minh.
-        </p>
-        <div className="row url-row">
-          <label htmlFor="clone-source">Video nguồn</label>
-          <select
-            id="clone-source"
-            value={cloneSource}
-            onChange={(e) => onCloneSource(e.target.value)}
-            disabled={cloneLocked || queue.length === 0}
-          >
-            <option value="">
-              {queue.length === 0 ? "Thêm video vào hàng đợi trước" : "— Chọn video —"}
-            </option>
-            {queue.map((item) => (
-              <option key={`${item.index}-${item.input}`} value={item.input}>
-                {item.stem}
-                {item.duration_label ? ` (${item.duration_label})` : ""}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="row url-row">
-          <label htmlFor="clone-name">Tên video</label>
-          <input
-            id="clone-name"
-            value={cloneName}
-            onChange={(e) => onCloneName(e.target.value)}
-            placeholder="vd: doan_gioi_thieu"
-            disabled={cloneLocked}
-          />
-        </div>
-        <div className="row clone-times">
-          <label htmlFor="clone-start">Bắt đầu</label>
-          <input
-            id="clone-start"
-            value={cloneStart}
-            onChange={(e) => onCloneStart(e.target.value)}
-            placeholder="0 hoặc 0:00"
-            disabled={cloneLocked}
-          />
-          <label htmlFor="clone-end">Kết thúc</label>
-          <input
-            id="clone-end"
-            value={cloneEnd}
-            onChange={(e) => onCloneEnd(e.target.value)}
-            placeholder="1:30 hoặc 90"
-            disabled={cloneLocked}
-          />
-          <button
-            type="button"
-            className="primary"
-            disabled={
-              cloneLocked ||
-              !cloneSource.trim() ||
-              !cloneStart.trim() ||
-              !cloneEnd.trim() ||
-              !cloneName.trim()
-            }
-            onClick={onCloneSegment}
-          >
-            {cloningSegment ? "Đang cắt…" : "Clone & thêm hàng đợi"}
-          </button>
-        </div>
-        <p className="muted url-dir-hint">
-          Thời gian: giây (90) hoặc MM:SS / HH:MM:SS. File lưu cạnh video nguồn với tên
-          bạn đặt (tự thêm đuôi <code>.mp4</code>/<code>.mkv</code>… nếu bỏ trống đuôi).
-        </p>
-      </section>
-
       <div className="grid">
         <section className={`panel ${settingsLocked ? "settings-locked" : ""}`}>
-          <h2>Thiết lập</h2>
+          <h2>Lồng tiếng Anh → Việt</h2>
           {settingsLocked ? (
             <p className="settings-lock-note">
               Đang xử lý — mọi thiết lập bị khóa đến khi xong hoặc tạm dừng.
             </p>
-          ) : null}
+          ) : (
+            <p className="muted url-lead">
+              Nhận dạng lời nói → dịch Việt → tạo giọng đọc → ghép lại video.
+            </p>
+          )}
           <div className="row">
             <label>Thư mục ra</label>
             <input
@@ -665,10 +375,10 @@ export function ProcessPage(props: Props) {
             <button
               type="button"
               className="danger"
-              disabled={!busy && !downloadingUrl}
+              disabled={!busy}
               onClick={onStop}
             >
-              {downloadingUrl ? "Hủy tải" : "Tạm dừng"}
+              Tạm dừng
             </button>
             <button
               type="button"
@@ -844,7 +554,7 @@ export function ProcessPage(props: Props) {
                     <button
                       type="button"
                       className="linkish"
-                      onClick={() => onPickCloneSource(item.input)}
+                      onClick={() => onGoClone(item.input)}
                     >
                       Clone đoạn
                     </button>

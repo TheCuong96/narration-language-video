@@ -56,11 +56,13 @@ body {
 
 .brand p { margin: 4px 0 0; color: var(--muted); max-width: 46ch; }
 
-.tabs { display: flex; gap: 6px; }
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
 .tab {
   border: 1px solid var(--line);
   background: #fff;
-  padding: 8px 14px;
+  padding: 8px 12px;
+  font-size: 0.92rem;
+  white-space: nowrap;
 }
 .tab.active {
   background: var(--accent);

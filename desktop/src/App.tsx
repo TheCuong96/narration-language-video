@@ -63,7 +63,9 @@ function suggestCloneName(source: string, start: string, end: string): string {
   return `${stem}_clip_${tag(start)}-${tag(end || "end")}`;
 }
 import { useElapsed } from "./hooks/useElapsed";
-import { ProcessPage } from "./pages/ProcessPage";
+import { ClonePage } from "./pages/ClonePage";
+import { DownloadPage } from "./pages/DownloadPage";
+import { DubPage } from "./pages/DubPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { TranscriptPage } from "./pages/TranscriptPage";
 
@@ -106,7 +108,7 @@ function friendlyLine(ev: EngineEvent): { text: string; cls?: string } {
 }
 
 export default function App() {
-  const [page, setPage] = useState<Page>("process");
+  const [page, setPage] = useState<Page>("dub");
   const [files, setFiles] = useState<string[]>([]);
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [outputDir, setOutputDir] = useState("");
@@ -186,7 +188,10 @@ export default function App() {
   /** Job was stopped and can be resumed from the same job id / stage cache. */
   const [canResume, setCanResume] = useState(false);
 
-  const elapsedSec = useElapsed(busy, jobId);
+  const elapsedSec = useElapsed(
+    busy || downloadingUrl,
+    jobId || (downloadingUrl ? "url-download" : null),
+  );
 
   const pushLog = useCallback((line: { text: string; cls?: string }) => {
     if (!line.text) return;
@@ -852,7 +857,7 @@ export default function App() {
       await reviewSet(jobId, reviewStem, segments);
       await continueAfterReview(jobId, reviewStem, onEngineEvent);
       setStageLabel(`Tạo giọng đọc: ${reviewStem}`);
-      setPage("process");
+      setPage("dub");
     } catch (e) {
       setBusy(false);
       setErrFriendly({ title: "Không tiếp tục được", body: String(e) });
@@ -861,17 +866,50 @@ export default function App() {
     }
   }
 
+  async function onPickCloneFile() {
+    if (busy || downloadingUrl || cloningSegment) return;
+    try {
+      const paths = await pickVideos();
+      const path = paths[0];
+      if (!path) return;
+      setCloneSource(path);
+      let end = cloneEnd.trim();
+      try {
+        const infos = await probeVideos([path]);
+        const d = infos[0]?.duration_sec;
+        if (typeof d === "number" && d > 0 && !end) {
+          end = String(Math.floor(d));
+          setCloneEnd(end);
+        }
+      } catch {
+        /* optional probe */
+      }
+      cloneNameTouchedRef.current = false;
+      refreshCloneNameSuggestion(path, cloneStart, end || cloneEnd, true);
+      pushLog({ text: `Chọn nguồn clone: ${baseName(path)}` });
+    } catch (e) {
+      pushLog({ text: String(e), cls: "warn" });
+    }
+  }
+
+  function goCloneWithSource(path: string) {
+    onPickCloneSource(path);
+    setPage("clone");
+  }
+
   return (
     <div className="app">
       <header className="brand">
         <div>
           <h1>Dub VI</h1>
-          <p>Lồng tiếng Việt — xử lý local, rõ tiến độ, sửa bản dịch trước khi tạo giọng.</p>
+          <p>Tải video · cắt đoạn · lồng tiếng Việt — chọn tab theo việc cần làm.</p>
         </div>
         <nav className="tabs">
           {(
             [
-              ["process", "Xử lý"],
+              ["download", "Tải từ liên kết"],
+              ["clone", "Clone đoạn"],
+              ["dub", "Lồng tiếng"],
               ["settings", "Settings"],
             ] as const
           ).map(([id, label]) => (
@@ -884,11 +922,64 @@ export default function App() {
               {label}
             </button>
           ))}
+          {page === "transcript" ? (
+            <button
+              type="button"
+              className="tab active"
+              onClick={() => setPage("transcript")}
+            >
+              Transcript
+            </button>
+          ) : null}
         </nav>
       </header>
 
-      {page === "process" && (
-        <ProcessPage
+      {page === "download" && (
+        <DownloadPage
+          urlInput={urlInput}
+          downloadDir={downloadDir}
+          urlHelp={urlHelp}
+          downloadingUrl={downloadingUrl}
+          lastUrlDownload={lastUrlDownload}
+          busy={busy}
+          stageLabel={stageLabel}
+          elapsedSec={elapsedSec}
+          fileProgress={fileProgress}
+          onChangeUrl={setUrlInput}
+          onChangeDownloadDir={setDownloadDir}
+          onPickDownloadDir={() => void onPickDownloadDir()}
+          onDownloadUrl={() => void onDownloadUrl()}
+          onStop={onStop}
+          onOpenDownloadFolder={() => {
+            if (lastUrlDownload?.folder) void openFolder(lastUrlDownload.folder);
+          }}
+          onDismissDownloadNotice={() => setLastUrlDownload(null)}
+          onGoDub={() => setPage("dub")}
+        />
+      )}
+
+      {page === "clone" && (
+        <ClonePage
+          cloneSource={cloneSource}
+          cloneStart={cloneStart}
+          cloneEnd={cloneEnd}
+          cloneName={cloneName}
+          cloningSegment={cloningSegment}
+          busy={busy}
+          downloadingUrl={downloadingUrl}
+          queue={queue}
+          onCloneSource={onCloneSourceChange}
+          onCloneStart={onCloneStartChange}
+          onCloneEnd={onCloneEndChange}
+          onCloneName={onCloneNameChange}
+          onCloneSegment={() => void onCloneSegment()}
+          onPickCloneFile={() => void onPickCloneFile()}
+          onGoDub={() => setPage("dub")}
+        />
+      )}
+
+      {page === "dub" && (
+        <DubPage
           files={files}
           queue={queue}
           outputDir={outputDir}
@@ -904,17 +995,13 @@ export default function App() {
           xttsSpeakerWav={settings.xtts_speaker_wav || ""}
           busy={busy}
           canResume={canResume}
+          downloadingUrl={downloadingUrl}
           stageLabel={stageLabel}
           fileProgress={fileProgress}
           overallProgress={overallProgress}
           elapsedSec={elapsedSec}
           completedElapsedSec={completedElapsedSec}
           dragOver={dragOver}
-          urlInput={urlInput}
-          downloadDir={downloadDir}
-          urlHelp={urlHelp}
-          downloadingUrl={downloadingUrl}
-          lastUrlDownload={lastUrlDownload}
           onDragOver={(e) => {
             e.preventDefault();
             setDragOver(true);
@@ -923,15 +1010,7 @@ export default function App() {
           onDrop={onBrowserDrop}
           onPickFiles={onPickFiles}
           onPickOut={onPickOut}
-          onPickDownloadDir={() => void onPickDownloadDir()}
           onChangeOutput={setOutputDir}
-          onChangeDownloadDir={setDownloadDir}
-          onChangeUrl={setUrlInput}
-          onDownloadUrl={() => void onDownloadUrl()}
-          onOpenDownloadFolder={() => {
-            if (lastUrlDownload?.folder) void openFolder(lastUrlDownload.folder);
-          }}
-          onDismissDownloadNotice={() => setLastUrlDownload(null)}
           onVoice={setVoice}
           onXttsSpeaker={(path) =>
             setSettings((s) => ({ ...s, xtts_speaker_wav: path }))
@@ -948,17 +1027,7 @@ export default function App() {
           onRetry={onRetry}
           onOpenOut={() => outputDir && openFolder(outputDir)}
           onOpenReview={loadReview}
-          cloneSource={cloneSource}
-          cloneStart={cloneStart}
-          cloneEnd={cloneEnd}
-          cloneName={cloneName}
-          cloningSegment={cloningSegment}
-          onCloneSource={onCloneSourceChange}
-          onCloneStart={onCloneStartChange}
-          onCloneEnd={onCloneEndChange}
-          onCloneName={onCloneNameChange}
-          onCloneSegment={() => void onCloneSegment()}
-          onPickCloneSource={onPickCloneSource}
+          onGoClone={goCloneWithSource}
         />
       )}
 

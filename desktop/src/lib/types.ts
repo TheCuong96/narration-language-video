@@ -1,6 +1,6 @@
 export type AudioMode = "vi_only" | "dual_track" | "mix";
 export type DeviceMode = "cpu" | "auto";
-export type Page = "process" | "transcript" | "settings";
+export type Page = "download" | "clone" | "dub" | "transcript" | "settings";
 
 export type QueueItemStatus =
   | "pending"
