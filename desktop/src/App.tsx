@@ -194,8 +194,13 @@ export default function App() {
   const urlDownloadedPathsRef = useRef<Set<string>>(new Set());
   /** Debounce writing remembered dirs into settings.json. */
   const dirPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Latest settings snapshot for flush-on-unmount. */
+  const settingsRef = useRef<AppSettings>(settings);
+  settingsRef.current = settings;
   /** Avoid saving defaults over disk before getSettings finishes. */
   const settingsHydratedRef = useRef(false);
+  /** User changed a dir before hydrate — don't let disk clobber that pick. */
+  const dirsTouchedRef = useRef({ output: false, download: false });
   const busyRef = useRef(false);
   const jobIdRef = useRef<string | null>(null);
   /** Files dropped while startJob is in-flight (busy but jobId not ready yet). */
@@ -242,6 +247,7 @@ export default function App() {
   const rememberDir = useCallback(
     (kind: "output" | "download", dir: string, opts?: { immediate?: boolean }) => {
       const trimmed = dir.trim();
+      dirsTouchedRef.current[kind] = true;
       if (kind === "output") {
         setOutputDir(dir);
         writeLocalDir(LS_OUTPUT_DIR, trimmed);
@@ -257,6 +263,7 @@ export default function App() {
             ? { default_output_dir: trimmed }
             : { default_download_dir: trimmed }),
         };
+        settingsRef.current = next;
         // Don't overwrite settings.json with defaults before initial load finishes.
         if (!settingsHydratedRef.current) return next;
         if (dirPersistTimerRef.current) {
@@ -264,7 +271,7 @@ export default function App() {
           dirPersistTimerRef.current = null;
         }
         const persist = () => {
-          void saveSettings(next).catch((e) => {
+          void saveSettings(settingsRef.current).catch((e) => {
             pushLog({
               text: `Không lưu đường dẫn thư mục: ${e}`,
               cls: "warn",
@@ -474,34 +481,51 @@ export default function App() {
   onEngineEventRef.current = onEngineEvent;
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       try {
         const s = await getSettings();
+        if (cancelled) return;
         const merged: AppSettings = { ...defaultSettings, ...s };
-        setSettings(merged);
         setModel(merged.whisper_model);
         setVoice(merged.voice);
         setAudioMode(merged.audio_mode);
         setMixDb(merged.mix_original_db);
         setReview(merged.review_by_default);
         setPreferGpu(merged.device_mode === "auto");
-        const out = (merged.default_output_dir || "").trim();
-        const dl = (merged.default_download_dir || "").trim();
+
+        const diskOut = (merged.default_output_dir || "").trim();
+        const diskDl = (merged.default_download_dir || "").trim();
         const localOut = readLocalDir(LS_OUTPUT_DIR);
         const localDl = readLocalDir(LS_DOWNLOAD_DIR);
-        // Prefer disk; if disk empty, keep localStorage and heal settings.json.
         let heal: Partial<AppSettings> | null = null;
-        if (out) {
-          setOutputDir(out);
-          writeLocalDir(LS_OUTPUT_DIR, out);
+
+        // Prefer: user pick during load → disk → localStorage backup.
+        if (dirsTouchedRef.current.output) {
+          const keep = localOut;
+          merged.default_output_dir = keep;
+          heal = { ...(heal || {}), default_output_dir: keep };
+        } else if (diskOut) {
+          setOutputDir(diskOut);
+          writeLocalDir(LS_OUTPUT_DIR, diskOut);
+          merged.default_output_dir = diskOut;
         } else if (localOut) {
           setOutputDir(localOut);
           merged.default_output_dir = localOut;
           heal = { ...(heal || {}), default_output_dir: localOut };
+        } else {
+          setOutputDir("");
+          merged.default_output_dir = "";
         }
-        if (dl) {
-          setDownloadDir(dl);
-          writeLocalDir(LS_DOWNLOAD_DIR, dl);
+
+        if (dirsTouchedRef.current.download) {
+          const keep = localDl;
+          merged.default_download_dir = keep;
+          heal = { ...(heal || {}), default_download_dir: keep };
+        } else if (diskDl) {
+          setDownloadDir(diskDl);
+          writeLocalDir(LS_DOWNLOAD_DIR, diskDl);
+          merged.default_download_dir = diskDl;
         } else if (localDl) {
           setDownloadDir(localDl);
           merged.default_download_dir = localDl;
@@ -509,21 +533,27 @@ export default function App() {
         } else {
           setDownloadDir("");
           writeLocalDir(LS_DOWNLOAD_DIR, "");
+          merged.default_download_dir = "";
         }
+
+        setSettings(merged);
+        settingsRef.current = merged;
         if (heal) {
-          setSettings(merged);
-          void saveSettings({ ...merged, ...heal }).catch(() => {
+          void saveSettings(merged).catch(() => {
             /* best-effort heal */
           });
         }
       } catch (e) {
-        pushLog({
-          text: `Không tải được cài đặt đã lưu: ${e}`,
-          cls: "warn",
-        });
+        if (!cancelled) {
+          pushLog({
+            text: `Không tải được cài đặt đã lưu: ${e}`,
+            cls: "warn",
+          });
+        }
       } finally {
-        settingsHydratedRef.current = true;
+        if (!cancelled) settingsHydratedRef.current = true;
       }
+      if (cancelled) return;
       try {
         setModels(await listModels());
       } catch {
@@ -541,9 +571,16 @@ export default function App() {
       }
     })();
     return () => {
+      cancelled = true;
       if (dirPersistTimerRef.current) {
         clearTimeout(dirPersistTimerRef.current);
         dirPersistTimerRef.current = null;
+        // Flush last typed path so closing within the debounce window still persists.
+        if (settingsHydratedRef.current) {
+          void saveSettings(settingsRef.current).catch(() => {
+            /* app closing */
+          });
+        }
       }
     };
   }, [pushLog]);
