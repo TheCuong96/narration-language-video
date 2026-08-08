@@ -195,6 +195,11 @@ async fn get_queue(job_id: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
+async fn enqueue_videos(job_id: String, files: Vec<String>) -> Result<Value, String> {
+    engine::enqueue_videos(job_id, files).await
+}
+
+#[tauri::command]
 async fn review_get(job_id: String, stem: String) -> Result<Value, String> {
     engine::run_engine_json(&["review-get", "--job-id", &job_id, "--stem", &stem]).await
 }
@@ -273,6 +278,7 @@ pub fn run() {
             retry_failed,
             resume_job,
             get_queue,
+            enqueue_videos,
             review_get,
             review_set,
             continue_after_review,

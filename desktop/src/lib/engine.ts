@@ -208,6 +208,22 @@ export async function getQueue(jobId: string): Promise<QueueState> {
   return invoke<QueueState>("get_queue", { jobId });
 }
 
+export interface EnqueueResult {
+  ok: boolean;
+  job_id: string;
+  added: string[];
+  added_count: number;
+  queue?: QueueState;
+}
+
+/** Append videos to a running job — they process automatically after the current file. */
+export async function enqueueVideos(
+  jobId: string,
+  files: string[],
+): Promise<EnqueueResult> {
+  return invoke<EnqueueResult>("enqueue_videos", { jobId, files });
+}
+
 export async function reviewGet(jobId: string, stem: string): Promise<{ segments: SegmentRow[] }> {
   return invoke("review_get", { jobId, stem });
 }

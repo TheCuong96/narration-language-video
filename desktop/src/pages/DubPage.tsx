@@ -163,6 +163,8 @@ export function DubPage(props: Props) {
   const stageKey = fileProgress.stage || "";
   const fileIndex = overallProgress.fileIndex || 0;
   const settingsLocked = busy || downloadingUrl;
+  /** Can add more videos while dubbing — they join the live queue automatically. */
+  const canAddVideos = !downloadingUrl;
   const hasCompletedResult =
     !busy &&
     !downloadingUrl &&
@@ -204,28 +206,35 @@ export function DubPage(props: Props) {
   return (
     <>
       <div
-        className={`dropzone ${dragOver && !settingsLocked ? "active" : ""} ${settingsLocked ? "locked" : ""}`}
-        onDragOver={settingsLocked ? undefined : onDragOver}
-        onDragLeave={settingsLocked ? undefined : onDragLeave}
-        onDrop={settingsLocked ? undefined : onDrop}
-        onClick={settingsLocked ? undefined : onPickFiles}
+        className={`dropzone ${dragOver && canAddVideos ? "active" : ""} ${!canAddVideos ? "locked" : ""}`}
+        onDragOver={canAddVideos ? onDragOver : undefined}
+        onDragLeave={canAddVideos ? onDragLeave : undefined}
+        onDrop={canAddVideos ? onDrop : undefined}
+        onClick={canAddVideos ? onPickFiles : undefined}
         role="button"
-        tabIndex={settingsLocked ? -1 : 0}
-        aria-disabled={settingsLocked}
+        tabIndex={canAddVideos ? 0 : -1}
+        aria-disabled={!canAddVideos}
       >
-        <strong>Kéo và thả video vào đây</strong>
-        <span>MP4 · MKV · MOV · AVI · WebM — hoặc bấm chọn một / nhiều file</span>
+        <strong>
+          {busy ? "Thêm video vào hàng đợi" : "Kéo và thả video vào đây"}
+        </strong>
+        <span>
+          {busy
+            ? "Video mới sẽ tự chạy sau khi video hiện tại xong — không cần bấm Bắt đầu lại"
+            : "MP4 · MKV · MOV · AVI · WebM — hoặc bấm chọn một / nhiều file"}
+        </span>
         {files.length === 1 ? (
           <PathTail path={files[0]} className="drop-path" />
         ) : (
           <div className="drop-path">{fileLabel}</div>
         )}
-        {settingsLocked ? (
-          <div className="drop-locked">
-            {downloadingUrl
-              ? "Đang tải video từ URL ở tab khác…"
-              : "Đang xử lý — không đổi video / thiết lập"}
+        {busy && canAddVideos ? (
+          <div className="drop-locked drop-add-hint">
+            Đang lồng tiếng — vẫn có thể thêm video; chúng sẽ chờ trong hàng đợi
           </div>
+        ) : null}
+        {!canAddVideos ? (
+          <div className="drop-locked">Đang tải video từ URL ở tab khác…</div>
         ) : null}
       </div>
 

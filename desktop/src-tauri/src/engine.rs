@@ -462,6 +462,32 @@ pub async fn run_engine_json(args: &[&str]) -> Result<Value, String> {
     serde_json::from_str(&out).map_err(|e| format!("JSON parse: {e}; out={out}"))
 }
 
+/// Append videos to a live job queue so they process after the current file.
+pub async fn enqueue_videos(job_id: String, files: Vec<String>) -> Result<Value, String> {
+    if files.is_empty() {
+        return Err("Không có video để thêm vào hàng đợi".into());
+    }
+    let mut args: Vec<String> = vec![
+        "queue-add".into(),
+        "--job-id".into(),
+        job_id,
+        "--files".into(),
+    ];
+    args.extend(files);
+    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let out = run_engine_capture(&refs)?;
+    let value: Value =
+        serde_json::from_str(&out).map_err(|e| format!("JSON parse: {e}; out={out}"))?;
+    if value.get("error").is_some() {
+        let msg = value
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("Không thêm được video vào hàng đợi");
+        return Err(msg.to_string());
+    }
+    Ok(value)
+}
+
 pub async fn download_model(
     app: AppHandle,
     state: State<'_, Mutex<EngineState>>,

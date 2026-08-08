@@ -140,6 +140,12 @@ body {
   font-weight: 600;
   color: var(--accent-ink);
 }
+.drop-add-hint {
+  opacity: 1;
+  background: rgba(12, 107, 88, 0.08);
+  border: 1px solid rgba(12, 107, 88, 0.2);
+  padding: 8px 10px;
+}
 
 .url-panel {
   margin-top: 14px;

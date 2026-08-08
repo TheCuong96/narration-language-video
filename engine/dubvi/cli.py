@@ -20,7 +20,7 @@ from .models import (
 )
 from .pipeline import continue_stem, run_job
 from .settings_store import load_settings, save_settings, AppSettings
-from .system_info import collect_system_info, new_job_id, setup_logging
+from .system_info import EngineError, collect_system_info, new_job_id, setup_logging
 
 
 def _add_run_shared(p: argparse.ArgumentParser) -> None:
@@ -121,6 +121,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     q_p = sub.add_parser("queue", help="Show job queue JSON")
     q_p.add_argument("--job-id", required=True)
+
+    q_add = sub.add_parser(
+        "queue-add",
+        help="Append videos to a running/paused job queue (auto-processed next)",
+    )
+    q_add.add_argument("--job-id", required=True)
+    q_add.add_argument("--files", "-f", nargs="+", type=Path, required=True)
 
     probe_p = sub.add_parser("probe", help="Probe video duration/size for UI")
     probe_p.add_argument("paths", nargs="+", type=Path)
@@ -608,6 +615,50 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"error": "QUEUE_NOT_FOUND", "job_id": args.job_id}))
             return 1
         print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "queue-add":
+        state = load_job_state(args.job_id)
+        if not state:
+            print(json.dumps({"error": "JOB_NOT_FOUND", "job_id": args.job_id}))
+            return 1
+        out_dir = Path(state["output_dir"])
+        try:
+            resolved = queue.resolve_inputs(input_files=list(args.files))
+            data, added = queue.append_videos(args.job_id, resolved, out_dir)
+        except EngineError as e:
+            print(
+                json.dumps(
+                    {"error": e.code.value, "message": e.message},
+                    ensure_ascii=False,
+                )
+            )
+            return 1
+        except Exception as e:
+            print(
+                json.dumps(
+                    {"error": "QUEUE_ADD_FAILED", "message": str(e)},
+                    ensure_ascii=False,
+                )
+            )
+            return 1
+        # Keep job.json input_files in sync for resume/retry
+        prev_files = [str(p) for p in (state.get("input_files") or [])]
+        merged_files = list(dict.fromkeys(prev_files + [str(p) for p in added]))
+        update_job_state(args.job_id, input_files=merged_files)
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "job_id": args.job_id,
+                    "added": [str(p) for p in added],
+                    "added_count": len(added),
+                    "queue": data,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return 0
 
     if args.command == "review-get":

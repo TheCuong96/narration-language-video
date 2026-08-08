@@ -24,6 +24,7 @@ import {
   reviewGet,
   reviewSet,
   saveSettings,
+  enqueueVideos,
   startJob,
   urlHelp as fetchUrlHelp,
   type UrlHelpInfo,
@@ -168,6 +169,10 @@ export default function App() {
   const urlDownloadedPathsRef = useRef<Set<string>>(new Set());
   /** Debounce writing remembered dirs into settings.json. */
   const dirPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const busyRef = useRef(false);
+  const jobIdRef = useRef<string | null>(null);
+  busyRef.current = busy;
+  jobIdRef.current = jobId;
 
   const refreshXttsSpeakers = useCallback(async () => {
     try {
@@ -436,56 +441,105 @@ export default function App() {
     })();
   }, []);
 
-  useEffect(() => {
-    let un: (() => void) | undefined;
-    (async () => {
-      try {
-        if (!("__TAURI_INTERNALS__" in window)) return;
-        const { getCurrentWebview } = await import("@tauri-apps/api/webview");
-        un = await getCurrentWebview().onDragDropEvent((event) => {
-          if (event.payload.type === "over") setDragOver(true);
-          else if (event.payload.type === "leave") setDragOver(false);
-          else if (event.payload.type === "drop") {
-            setDragOver(false);
-            const paths = (event.payload.paths || []).filter((p) =>
-              /\.(mp4|mkv|mov|avi|webm)$/i.test(p),
-            );
-            if (paths.length) void addFiles(paths);
-          }
-        });
-      } catch {
-        /* ignore */
-      }
-    })();
-    return () => un?.();
-  }, []);
-
   async function addFiles(paths: string[], opts?: { fromUrl?: boolean }) {
-    const merged = Array.from(new Set([...files, ...paths]));
-    setFiles(merged);
+    if (!paths.length) return null;
     if (opts?.fromUrl) {
       for (const p of paths) urlDownloadedPathsRef.current.add(p);
     }
+
+    const fresh = paths.filter((p) => !files.includes(p));
+    const merged = Array.from(new Set([...files, ...paths]));
+    setFiles(merged);
+
     const nextSource = cloneSource || paths[0] || "";
     if (!cloneSource && paths[0]) {
       setCloneSource(paths[0]);
     }
+
+    // While a dub job is running: append to engine queue (auto-process next).
+    const liveJobId = busyRef.current ? jobIdRef.current : null;
+    if (liveJobId && fresh.length) {
+      try {
+        const result = await enqueueVideos(liveJobId, fresh);
+        const added = result.added?.length ? result.added : fresh;
+        pushLog({
+          text:
+            added.length > 0
+              ? `Đã thêm ${added.length} video vào hàng đợi — sẽ chạy tự động sau video hiện tại`
+              : "Video đã có trong hàng đợi",
+        });
+        if (result.queue?.items?.length) {
+          const probedNew = await probeVideos(added).catch(() => null);
+          const probeMap = new Map(
+            (probedNew || []).map((p) => [p.path, p] as const),
+          );
+          setQueue((prev) => {
+            const meta = new Map(prev.map((p) => [p.stem, p]));
+            return result.queue!.items.map((it) => {
+              const prevItem = meta.get(it.stem);
+              const probe = probeMap.get(it.input);
+              return {
+                ...it,
+                duration_label:
+                  prevItem?.duration_label || probe?.duration_label,
+                size_label: prevItem?.size_label || probe?.size_label,
+                duration_sec: prevItem?.duration_sec ?? probe?.duration_sec,
+                size_bytes: prevItem?.size_bytes ?? probe?.size_bytes,
+                from_url:
+                  Boolean(prevItem?.from_url) ||
+                  urlDownloadedPathsRef.current.has(it.input),
+              };
+            });
+          });
+          setOverallProgress((p) => ({
+            ...p,
+            fileTotal: result.queue!.items.length,
+          }));
+        }
+        // Race: job finished between click and enqueue — resume pending items.
+        if (!busyRef.current) {
+          pushLog({ text: "Job vừa xong — tự tiếp tục hàng đợi mới thêm…" });
+          setBusy(true);
+          sawTerminalRef.current = false;
+          userStoppedRef.current = false;
+          setCanResume(false);
+          try {
+            await resumeJob(liveJobId, onEngineEvent);
+          } catch (e) {
+            setBusy(false);
+            pushLog({ text: String(e), cls: "error" });
+          }
+        }
+        return null;
+      } catch (e) {
+        pushLog({ text: String(e), cls: "error" });
+        // Fall through to local queue update so UI still shows the files.
+      }
+    }
+
     try {
       const probed = await probeVideos(merged);
-      setQueue(
-        probed.map((p, i) => ({
-          index: i,
-          input: p.path,
-          output: "",
-          stem: p.stem,
-          status: "pending",
-          duration_label: p.duration_label,
-          size_label: p.size_label,
-          duration_sec: p.duration_sec,
-          size_bytes: p.size_bytes,
-          from_url: urlDownloadedPathsRef.current.has(p.path),
-        })),
-      );
+      setQueue((prev) => {
+        // Preserve live statuses when merging into an idle/local queue view.
+        const prevByInput = new Map(prev.map((p) => [p.input, p]));
+        return probed.map((p, i) => {
+          const old = prevByInput.get(p.path);
+          return {
+            index: i,
+            input: p.path,
+            output: old?.output || "",
+            stem: p.stem,
+            status: old?.status || "pending",
+            error: old?.error,
+            code: old?.code,
+            duration_label: p.duration_label,
+            size_label: p.size_label,
+            duration_sec: p.duration_sec,
+            size_bytes: p.size_bytes,
+            from_url: urlDownloadedPathsRef.current.has(p.path),
+          };
+        });
+      });
       let endForSuggest = cloneEnd.trim();
       if (!endForSuggest) {
         const srcPath = nextSource;
@@ -500,22 +554,56 @@ export default function App() {
       }
       return probed;
     } catch {
-      setQueue(
-        merged.map((f, i) => ({
-          index: i,
-          input: f,
-          output: "",
-          stem: f.replace(/^.*[\\/]/, "").replace(/\.[^.]+$/, ""),
-          status: "pending",
-          from_url: urlDownloadedPathsRef.current.has(f),
-        })),
-      );
+      setQueue((prev) => {
+        const prevByInput = new Map(prev.map((p) => [p.input, p]));
+        return merged.map((f, i) => {
+          const old = prevByInput.get(f);
+          return {
+            index: i,
+            input: f,
+            output: old?.output || "",
+            stem:
+              old?.stem ||
+              f.replace(/^.*[\\/]/, "").replace(/\.[^.]+$/, ""),
+            status: old?.status || "pending",
+            from_url: urlDownloadedPathsRef.current.has(f),
+          };
+        });
+      });
       return null;
     }
   }
 
+  const addFilesRef = useRef(addFiles);
+  addFilesRef.current = addFiles;
+
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    (async () => {
+      try {
+        if (!("__TAURI_INTERNALS__" in window)) return;
+        const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+        un = await getCurrentWebview().onDragDropEvent((event) => {
+          if (event.payload.type === "over") setDragOver(true);
+          else if (event.payload.type === "leave") setDragOver(false);
+          else if (event.payload.type === "drop") {
+            setDragOver(false);
+            if (downloadingUrl) return;
+            const paths = (event.payload.paths || []).filter((p) =>
+              /\.(mp4|mkv|mov|avi|webm)$/i.test(p),
+            );
+            if (paths.length) void addFilesRef.current(paths);
+          }
+        });
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => un?.();
+  }, [downloadingUrl]);
+
   async function onPickFiles() {
-    if (busy || downloadingUrl) return;
+    if (downloadingUrl) return;
     try {
       const picked = await pickVideos();
       if (picked?.length) await addFiles(picked);
@@ -716,7 +804,7 @@ export default function App() {
   function onBrowserDrop(e: DragEvent) {
     e.preventDefault();
     setDragOver(false);
-    if (busy || downloadingUrl) return;
+    if (downloadingUrl) return;
     const list = filterVideoFiles(e.dataTransfer.files);
     if (!list.length) return;
     pushLog({

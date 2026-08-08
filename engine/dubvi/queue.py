@@ -205,3 +205,104 @@ def mark_active_cancelled(job_id: str) -> dict[str, Any] | None:
     if changed:
         save_queue(job_id, data)
     return data
+
+
+def append_videos(
+    job_id: str,
+    videos: list[Path],
+    output_dir: Path,
+) -> tuple[dict[str, Any], list[Path]]:
+    """
+    Append new videos as pending items to a live job queue.
+    Skips paths already in the queue. Rejects duplicate stems (work-dir clash).
+    Returns (queue_data, newly_added_paths).
+    """
+    data = load_queue(job_id) or {
+        "job_id": job_id,
+        "items": [],
+        "created_at": time.time(),
+    }
+    items: list[dict[str, Any]] = list(data.get("items") or [])
+    existing_paths = set()
+    existing_stems = set()
+    for it in items:
+        raw = it.get("input") or ""
+        try:
+            existing_paths.add(str(Path(raw).expanduser().resolve()).lower())
+        except OSError:
+            existing_paths.add(str(raw).lower())
+        existing_stems.add(str(it.get("stem") or "").lower())
+
+    added: list[Path] = []
+    for v in videos:
+        try:
+            rp = v.expanduser().resolve()
+        except OSError as e:
+            raise EngineError(ErrorCode.INPUT_NOT_FOUND, f"Đường dẫn không hợp lệ: {v}") from e
+        if not is_video_file(rp):
+            raise EngineError(
+                ErrorCode.UNSUPPORTED_FORMAT,
+                f"Định dạng không hỗ trợ hoặc không phải video: {rp.name}",
+            )
+        key = str(rp).lower()
+        if key in existing_paths:
+            continue
+        stem = rp.stem
+        if stem.lower() in existing_stems:
+            raise EngineError(
+                ErrorCode.UNSUPPORTED_FORMAT,
+                f"Đã có video cùng tên «{stem}» trong hàng đợi — đổi tên file rồi thêm lại.",
+            )
+        out = output_path_for(rp, output_dir)
+        items.append(
+            {
+                "index": len(items),
+                "input": str(rp),
+                "output": str(out),
+                "stem": stem,
+                "status": QueueItemStatus.PENDING.value,
+                "error": None,
+                "code": None,
+            }
+        )
+        existing_paths.add(key)
+        existing_stems.add(stem.lower())
+        added.append(rp)
+
+    # Re-index for stable UI ordering
+    for i, it in enumerate(items):
+        it["index"] = i
+    data["items"] = items
+    data["job_id"] = job_id
+    save_queue(job_id, data)
+    return data, added
+
+
+def next_work_item(
+    job_id: str,
+    *,
+    also_stems: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """
+    Next queue item to process for a live/resume job.
+
+    Always picks pending items (including videos appended mid-run).
+    Also picks cancelled/failed/running stems listed in also_stems (resume/retry).
+    """
+    data = load_queue(job_id)
+    if not data:
+        return None
+    also = {s.lower() for s in (also_stems or [])}
+    resume_statuses = {
+        QueueItemStatus.CANCELLED.value,
+        QueueItemStatus.FAILED.value,
+        QueueItemStatus.RUNNING.value,
+    }
+    for item in data.get("items") or []:
+        st = item.get("status")
+        stem = str(item.get("stem") or "")
+        if st == QueueItemStatus.PENDING.value:
+            return item
+        if stem.lower() in also and st in resume_statuses:
+            return item
+    return None

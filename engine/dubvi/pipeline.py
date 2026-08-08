@@ -429,18 +429,45 @@ def run_job(cfg: JobConfig) -> int:
         failed: list[str] = []
         review_paused: list[str] = []
         last_output: str | None = None
+        # Re-read queue each round so videos appended mid-job are picked up automatically.
+        processed_this_run: set[str] = set()
+        also_stems = list(cfg.retry_stems or [])
 
-        for idx, video in enumerate(videos):
+        while True:
+            item = queue.next_work_item(jid, also_stems=also_stems)
+            if item is None:
+                break
+            stem = str(item.get("stem") or "")
+            if stem in processed_this_run:
+                log.warning("queue item %s still eligible after process — stop loop", stem)
+                break
+            processed_this_run.add(stem)
+
+            video = Path(str(item["input"]))
+            qsnap = queue.load_queue(jid) or {}
+            qitems = list(qsnap.get("items") or [])
+            total = max(len(qitems), 1)
+            try:
+                idx0 = next(i for i, it in enumerate(qitems) if it.get("stem") == stem)
+            except StopIteration:
+                idx0 = len(processed_this_run) - 1
+            n_done = sum(
+                1
+                for it in qitems
+                if it.get("status")
+                in (QueueItemStatus.COMPLETED.value, QueueItemStatus.SKIPPED.value)
+            )
+
             events.progress(
                 Stage.QUEUED,
-                idx,
-                len(videos),
-                f"Bắt đầu video {idx + 1}/{len(videos)}: {video.name}",
-                percent=0 if len(videos) else 0,
-                overall_percent=round(100.0 * idx / max(len(videos), 1), 1),
+                idx0,
+                total,
+                f"Bắt đầu video {idx0 + 1}/{total}: {video.name}",
+                percent=0,
+                overall_percent=round(100.0 * n_done / total, 1),
                 file=video.name,
-                file_index=idx + 1,
-                file_total=len(videos),
+                file_index=idx0 + 1,
+                file_total=total,
                 stage_label="Hàng đợi",
             )
             try:
@@ -457,8 +484,8 @@ def run_job(cfg: JobConfig) -> int:
                     cfg,
                     job_root,
                     cancel,
-                    file_index=idx,
-                    file_total=len(videos),
+                    file_index=idx0,
+                    file_total=total,
                 )
                 if out is None:
                     review_paused.append(video.stem)
@@ -493,6 +520,11 @@ def run_job(cfg: JobConfig) -> int:
                     code=ErrorCode.INTERNAL.value,
                 )
                 failed.append(video.name)
+                events.queue_updated(queue.load_queue(jid) or {})
+
+            # Review pause stops the run; remaining pending (incl. appends) wait for continue.
+            if review_paused:
+                break
 
         if review_paused and not failed:
             update_job_state(jid, status="review", review_stems=review_paused)
@@ -518,9 +550,15 @@ def run_job(cfg: JobConfig) -> int:
             )
             return 1
 
+        final_q = queue.load_queue(jid) or {}
+        final_count = len(final_q.get("items") or [])
         update_job_state(jid, status="completed", output=last_output)
         events.stage(Stage.DONE, "Hoàn tất tất cả video")
-        events.completed(last_output, job_id=jid, count=len(videos))
+        events.completed(
+            last_output,
+            job_id=jid,
+            count=final_count or len(processed_this_run),
+        )
         return 0
 
     except EngineError as e:
