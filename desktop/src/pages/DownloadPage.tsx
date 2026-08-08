@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { PathInput, PathTail } from "../components/PathInput";
 import type { UrlDownloadNotice } from "../lib/types";
 import type { UrlHelpInfo } from "../lib/engine";
 import { formatElapsed } from "../hooks/useElapsed";
@@ -65,12 +66,13 @@ export function DownloadPage(props: Props) {
         </p>
         <div className="row url-row">
           <label htmlFor="download-dir">Lưu vào</label>
-          <input
+          <PathInput
             id="download-dir"
             value={downloadDir}
             onChange={(e) => onChangeDownloadDir(e.target.value)}
             placeholder="Để trống = thư mục tạm của app (AppData\DubVI\downloads)"
             disabled={locked}
+            title={downloadDir || undefined}
           />
           <button type="button" onClick={onPickDownloadDir} disabled={locked}>
             Chọn
@@ -78,12 +80,13 @@ export function DownloadPage(props: Props) {
         </div>
         <div className="row url-row">
           <label htmlFor="video-url">URL</label>
-          <input
+          <PathInput
             id="video-url"
             value={urlInput}
             onChange={(e) => onChangeUrl(e.target.value)}
             placeholder="https://www.youtube.com/watch?v=…"
             disabled={locked}
+            title={urlInput || undefined}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !locked) {
                 e.preventDefault();
@@ -150,11 +153,15 @@ export function DownloadPage(props: Props) {
               </div>
               <div>
                 <dt>Thư mục</dt>
-                <dd className="path">{lastUrlDownload.folder}</dd>
+                <dd className="path path-tail">
+                  <bdi>{lastUrlDownload.folder}</bdi>
+                </dd>
               </div>
               <div>
                 <dt>Đường dẫn đầy đủ</dt>
-                <dd className="path">{lastUrlDownload.path}</dd>
+                <dd className="path path-tail">
+                  <bdi>{lastUrlDownload.path}</bdi>
+                </dd>
               </div>
               {(lastUrlDownload.duration_label || lastUrlDownload.size_label) && (
                 <div>
@@ -168,7 +175,9 @@ export function DownloadPage(props: Props) {
               )}
               <div>
                 <dt>URL nguồn</dt>
-                <dd className="path">{lastUrlDownload.sourceUrl}</dd>
+                <dd className="path">
+                  <PathTail path={lastUrlDownload.sourceUrl} />
+                </dd>
               </div>
             </dl>
             <div className="url-status-actions">

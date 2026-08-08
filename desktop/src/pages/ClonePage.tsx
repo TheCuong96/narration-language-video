@@ -1,3 +1,4 @@
+import { PathInput } from "../components/PathInput";
 import type { QueueItem } from "../lib/types";
 
 interface Props {
@@ -49,12 +50,13 @@ export function ClonePage(props: Props) {
 
       <div className="row url-row">
         <label htmlFor="clone-source-path">Video nguồn</label>
-        <input
+        <PathInput
           id="clone-source-path"
           value={cloneSource}
           readOnly
           placeholder="Chưa chọn video"
           disabled={locked}
+          title={cloneSource || undefined}
         />
         <button type="button" onClick={onPickCloneFile} disabled={locked}>
           Chọn file

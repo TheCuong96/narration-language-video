@@ -1,4 +1,5 @@
 import { useMemo, type DragEvent, type MouseEvent } from "react";
+import { PathInput, PathTail } from "../components/PathInput";
 import type { AudioMode, QueueItem, XttsSpeakerOption } from "../lib/types";
 import { formatElapsed, useElapsed } from "../hooks/useElapsed";
 import { computeProgressEta } from "../lib/progressEta";
@@ -214,7 +215,11 @@ export function DubPage(props: Props) {
       >
         <strong>Kéo và thả video vào đây</strong>
         <span>MP4 · MKV · MOV · AVI · WebM — hoặc bấm chọn một / nhiều file</span>
-        <div className="drop-path">{fileLabel}</div>
+        {files.length === 1 ? (
+          <PathTail path={files[0]} className="drop-path" />
+        ) : (
+          <div className="drop-path">{fileLabel}</div>
+        )}
         {settingsLocked ? (
           <div className="drop-locked">
             {downloadingUrl
@@ -224,8 +229,7 @@ export function DubPage(props: Props) {
         ) : null}
       </div>
 
-      <div className="grid">
-        <section className={`panel ${settingsLocked ? "settings-locked" : ""}`}>
+      <section className={`panel ${settingsLocked ? "settings-locked" : ""}`}>
           <h2>Lồng tiếng Anh → Việt</h2>
           {settingsLocked ? (
             <p className="settings-lock-note">
@@ -238,11 +242,12 @@ export function DubPage(props: Props) {
           )}
           <div className="row">
             <label>Thư mục ra</label>
-            <input
+            <PathInput
               value={outputDir}
               onChange={(e) => onChangeOutput(e.target.value)}
               placeholder="D:\\videos\\vi — chọn một lần là nhớ mãi"
               disabled={settingsLocked}
+              title={outputDir || undefined}
             />
             <button type="button" onClick={onPickOut} disabled={settingsLocked}>
               Chọn
@@ -407,9 +412,9 @@ export function DubPage(props: Props) {
               Mở kết quả
             </button>
           </div>
-        </section>
+      </section>
 
-        <section className="panel">
+      <section className="panel">
           <h2>Tiến độ</h2>
           <div className="stage">{stageLabel || "Sẵn sàng"}</div>
           <div className="meta-line">
@@ -524,8 +529,7 @@ export function DubPage(props: Props) {
               </li>
             ))}
           </ul>
-        </section>
-      </div>
+      </section>
 
       <section className="panel">
         <h2>Hàng đợi</h2>
@@ -548,10 +552,8 @@ export function DubPage(props: Props) {
                 <div className="q-meta">
                   {item.duration_label || "—"} · {item.size_label || "—"}
                 </div>
-                {item.from_url && item.input ? (
-                  <div className="q-path" title={item.input}>
-                    {item.input}
-                  </div>
+                {item.input ? (
+                  <PathTail path={item.input} className="q-path" />
                 ) : null}
                 {item.error && <div className="q-err">{item.error}</div>}
                 <div className="q-actions">

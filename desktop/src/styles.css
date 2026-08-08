@@ -93,7 +93,47 @@ body {
 }
 .dropzone strong { display: block; font-size: 1.1rem; margin-bottom: 6px; }
 .dropzone span { color: var(--muted); }
-.drop-path { margin-top: 10px; word-break: break-all; }
+.drop-path {
+  margin-top: 10px;
+  max-width: 100%;
+}
+.drop-path.path-tail {
+  margin-top: 10px;
+}
+
+/* Long paths/URLs: hide the start, keep the end (works when the frame resizes) */
+.path-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  white-space: nowrap;
+}
+.path-input.show-tail {
+  direction: rtl;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.path-input.is-focused {
+  direction: ltr;
+  text-align: left;
+  overflow-x: auto;
+  text-overflow: clip;
+}
+.path-tail {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+  min-width: 0;
+  max-width: 100%;
+}
+.path-tail bdi {
+  direction: ltr;
+  unicode-bidi: embed;
+}
 .drop-locked {
   margin-top: 10px;
   font-size: 0.85rem;
@@ -252,6 +292,10 @@ button.linkish:hover {
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
   font-size: 0.84rem;
 }
+.url-status-meta dd.path.path-tail {
+  word-break: normal;
+  direction: rtl;
+}
 .url-status-actions {
   margin-top: 12px;
   display: flex;
@@ -284,8 +328,10 @@ button.linkish:hover {
   margin-top: 4px;
   font-size: 0.78rem;
   color: var(--muted);
-  word-break: break-all;
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+.q-path.path-tail {
+  word-break: normal;
 }
 
 .settings-lock-note {
@@ -354,6 +400,7 @@ button.linkish:hover {
 .row label { min-width: 120px; color: var(--muted); font-size: 0.92rem; }
 .row input, .row select {
   flex: 1;
+  min-width: 0;
   border: 1px solid var(--line);
   background: #fff;
   padding: 8px 10px;
@@ -460,11 +507,15 @@ button.btn-open-result.is-ready:disabled {
 }
 .queue li, .model-list li {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
   padding: 10px 12px;
   border: 1px solid var(--line);
   background: #fff;
+}
+.queue li > div {
+  min-width: 0;
+  overflow: hidden;
 }
 .queue .empty { display: block; color: var(--muted); }
 .q-title {
