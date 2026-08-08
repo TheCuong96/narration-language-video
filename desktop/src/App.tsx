@@ -166,6 +166,8 @@ export default function App() {
   const cloneNameTouchedRef = useRef(false);
   const urlJobIdRef = useRef<string | null>(null);
   const urlDownloadedPathsRef = useRef<Set<string>>(new Set());
+  /** Debounce writing remembered dirs into settings.json. */
+  const dirPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refreshXttsSpeakers = useCallback(async () => {
     try {
@@ -197,6 +199,45 @@ export default function App() {
     if (!line.text) return;
     setLogs((prev) => [...prev.slice(-500), line]);
   }, []);
+
+  /**
+   * Remember output / download folders across app restarts.
+   * Only changes when the user picks or edits a path (written to settings.json).
+   */
+  const rememberDir = useCallback(
+    (kind: "output" | "download", dir: string, opts?: { immediate?: boolean }) => {
+      const trimmed = dir.trim();
+      if (kind === "output") setOutputDir(dir);
+      else setDownloadDir(dir);
+
+      setSettings((prev) => {
+        const next: AppSettings = {
+          ...prev,
+          ...(kind === "output"
+            ? { default_output_dir: trimmed }
+            : { default_download_dir: trimmed }),
+        };
+        if (dirPersistTimerRef.current) {
+          clearTimeout(dirPersistTimerRef.current);
+          dirPersistTimerRef.current = null;
+        }
+        const persist = () => {
+          void saveSettings(next).catch((e) => {
+            pushLog({
+              text: `Không lưu đường dẫn thư mục: ${e}`,
+              cls: "warn",
+            });
+          });
+        };
+        if (opts?.immediate) persist();
+        else {
+          dirPersistTimerRef.current = setTimeout(persist, 400);
+        }
+        return next;
+      });
+    },
+    [pushLog],
+  );
 
   const onEngineEvent = useCallback(
     (ev: EngineEvent) => {
@@ -561,7 +602,10 @@ export default function App() {
     if (busy || downloadingUrl) return;
     try {
       const dir = await pickOutputDir();
-      if (dir) setOutputDir(dir);
+      if (dir) {
+        rememberDir("output", dir, { immediate: true });
+        pushLog({ text: `Đã nhớ thư mục ra: ${dir}` });
+      }
     } catch (e) {
       pushLog({ text: String(e), cls: "warn" });
     }
@@ -571,7 +615,10 @@ export default function App() {
     if (busy || downloadingUrl) return;
     try {
       const dir = await pickDownloadDir();
-      if (dir) setDownloadDir(dir);
+      if (dir) {
+        rememberDir("download", dir, { immediate: true });
+        pushLog({ text: `Đã nhớ thư mục tải về: ${dir}` });
+      }
     } catch (e) {
       pushLog({ text: String(e), cls: "warn" });
     }
@@ -946,7 +993,7 @@ export default function App() {
           elapsedSec={elapsedSec}
           fileProgress={fileProgress}
           onChangeUrl={setUrlInput}
-          onChangeDownloadDir={setDownloadDir}
+          onChangeDownloadDir={(v) => rememberDir("download", v)}
           onPickDownloadDir={() => void onPickDownloadDir()}
           onDownloadUrl={() => void onDownloadUrl()}
           onStop={onStop}
@@ -1010,7 +1057,7 @@ export default function App() {
           onDrop={onBrowserDrop}
           onPickFiles={onPickFiles}
           onPickOut={onPickOut}
-          onChangeOutput={setOutputDir}
+          onChangeOutput={(v) => rememberDir("output", v)}
           onVoice={setVoice}
           onXttsSpeaker={(path) =>
             setSettings((s) => ({ ...s, xtts_speaker_wav: path }))

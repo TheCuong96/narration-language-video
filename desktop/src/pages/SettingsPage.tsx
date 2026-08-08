@@ -254,6 +254,7 @@ export function SettingsPage({
             onChange={(e) =>
               onChange({ ...settings, default_output_dir: e.target.value })
             }
+            placeholder="Nhớ sau khi chọn ở tab Lồng tiếng"
           />
         </div>
         <div className="row">
@@ -266,6 +267,11 @@ export function SettingsPage({
             placeholder="Để trống = AppData\\DubVI\\downloads"
           />
         </div>
+        <p className="muted" style={{ marginTop: "-0.35rem" }}>
+          Hai đường dẫn trên được nhớ tự động khi bạn chọn thư mục ở tab Tải từ liên
+          kết / Lồng tiếng; vẫn giữ sau khi tắt app. Chỉ đổi khi bạn chọn chỗ mới hoặc
+          sửa rồi bấm Lưu ở đây.
+        </p>
         <div className="row">
           <label>Mức audio gốc (mix)</label>
           <input

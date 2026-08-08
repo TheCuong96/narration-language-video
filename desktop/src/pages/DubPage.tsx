@@ -241,13 +241,18 @@ export function DubPage(props: Props) {
             <input
               value={outputDir}
               onChange={(e) => onChangeOutput(e.target.value)}
-              placeholder="D:\\videos\\vi"
+              placeholder="D:\\videos\\vi — chọn một lần là nhớ mãi"
               disabled={settingsLocked}
             />
             <button type="button" onClick={onPickOut} disabled={settingsLocked}>
               Chọn
             </button>
           </div>
+          {outputDir.trim() ? (
+            <p className="muted" style={{ marginTop: "-0.35rem" }}>
+              Đã nhớ thư mục ra — tắt app mở lại vẫn dùng đến khi bạn chọn chỗ khác.
+            </p>
+          ) : null}
           <div className="row">
             <label>Giọng</label>
             {ttsProvider === "xtts-v2" ? (

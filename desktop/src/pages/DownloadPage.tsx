@@ -110,8 +110,8 @@ export function DownloadPage(props: Props) {
         </div>
         <p className="muted url-dir-hint">
           {downloadDir.trim()
-            ? `Video sẽ lưu vào: ${downloadDir.trim()}`
-            : "Chưa chọn thư mục — file sẽ vào thư mục tải tạm của Dub VI."}
+            ? `Video sẽ lưu vào: ${downloadDir.trim()} (đã nhớ — mở lại app vẫn dùng)`
+            : "Chưa chọn thư mục — file sẽ vào thư mục tải tạm của Dub VI. Sau khi chọn một lần, app sẽ nhớ cho các lần sau."}
         </p>
 
         {downloadingUrl ? (
