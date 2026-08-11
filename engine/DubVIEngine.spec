@@ -1,10 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec for DubVIEngine.exe (Tauri sidecar).
+PyInstaller spec for DubVIEngine (Tauri sidecar).
 
 Build (from engine/):
   pip install -r requirements-base.txt pyinstaller
   pyinstaller DubVIEngine.spec
+
+Use onedir (not onefile): onefile unpacks ~1GB into %TEMP%\\_MEI* on every
+launch and often leaves orphans when the process is force-killed. Onedir
+ships the extracted tree next to the exe so no TEMP extract is needed.
 
 Bundle FFmpeg separately into resources/bin for the Tauri installer —
 do not rely on system PATH in production.
@@ -79,21 +83,28 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="DubVIEngine",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    upx_exclude=[],
-    runtime_tmpdir=None,
     console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="DubVIEngine",
 )

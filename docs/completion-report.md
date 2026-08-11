@@ -10,7 +10,7 @@ Ngày: 2026-07-31
 | `npm run typecheck` + `npm run build` | **Pass** |
 | `cargo check` (Tauri) | **Pass** |
 | `scripts/download-ffmpeg.ps1` | **Pass** (ffmpeg/ffprobe trong `resources/bin`) |
-| PyInstaller `DubVIEngine.exe` | **Pass** (~91 MB) |
+| PyInstaller `DubVIEngine` onedir | **Pass** (shipped under `resources/engine`) |
 | `npm run tauri build` (NSIS) | **Pass** |
 | `scripts/verify-package.ps1` | **VERIFY PASSED** |
 | Artifact | `release/DubVI_0.1.0_x64-setup.exe` (~144 MB) + `.sha256` |

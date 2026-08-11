@@ -62,27 +62,92 @@ fn is_cargo_target_exe() -> bool {
         .unwrap_or(false)
 }
 
+/// Locate the onedir PyInstaller sidecar (exe + `_internal`), never a onefile stub.
+fn resolve_sidecar_exe() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.extend([
+                dir.join("engine").join("DubVIEngine.exe"),
+                dir.join("resources").join("engine").join("DubVIEngine.exe"),
+                // Legacy onefile next to app (older installs) — still works but creates _MEI*
+                dir.join("DubVIEngine.exe"),
+            ]);
+        }
+    }
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    candidates.push(
+        manifest
+            .join("resources")
+            .join("engine")
+            .join("DubVIEngine.exe"),
+    );
+    candidates.into_iter().find(|p| p.is_file())
+}
+
 pub fn engine_command() -> (PathBuf, Vec<String>) {
     if let Ok(p) = std::env::var("DUBVI_ENGINE") {
         return (PathBuf::from(p), vec![]);
     }
     // During `tauri dev` / cargo runs, prefer live Python so engine source edits apply
-    // without rebuilding the stale PyInstaller sidecar next to dubvi.exe.
+    // without rebuilding the stale PyInstaller sidecar.
     let engine_pkg = repo_engine_dir().join("dubvi").join("__init__.py");
     if is_cargo_target_exe() && engine_pkg.is_file() {
         let py = which_python();
         return (py, vec!["-u".into(), "-m".into(), "dubvi".into()]);
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let side = dir.join("DubVIEngine.exe");
-            if side.is_file() {
-                return (side, vec![]);
-            }
-        }
+    if let Some(side) = resolve_sidecar_exe() {
+        return (side, vec![]);
     }
     let py = which_python();
     (py, vec!["-u".into(), "-m".into(), "dubvi".into()])
+}
+
+fn engine_workdir(bin: &std::path::Path) -> PathBuf {
+    let name = bin
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if name == "dubviengine.exe" || name == "dubviengine" {
+        if let Some(parent) = bin.parent() {
+            return parent.to_path_buf();
+        }
+    }
+    let src = repo_engine_dir();
+    if src.is_dir() {
+        return src;
+    }
+    bin.parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Delete orphan PyInstaller `%TEMP%\_MEI*` folders (leftover from onefile / force-kill).
+pub fn cleanup_orphan_mei_dirs() -> u32 {
+    let temp = std::env::temp_dir();
+    let Ok(entries) = std::fs::read_dir(&temp) else {
+        return 0;
+    };
+    let mut removed = 0u32;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("_MEI") {
+            continue;
+        }
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => removed += 1,
+            Err(_) => {
+                // In use by a live process — skip.
+            }
+        }
+    }
+    removed
 }
 
 fn which_python() -> PathBuf {
@@ -152,17 +217,8 @@ fn spawn_streaming(
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
         .env_clear()
-        .envs(env);
-    // Prefer live engine source in cargo builds; otherwise stay next to the app
-    // (CARGO_MANIFEST_DIR is baked at compile time and may not exist when installed).
-    let engine_src = repo_engine_dir();
-    if engine_src.is_dir() {
-        cmd.current_dir(&engine_src);
-    } else if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            cmd.current_dir(dir);
-        }
-    }
+        .envs(env)
+        .current_dir(engine_workdir(&bin));
 
     #[cfg(windows)]
     {
@@ -207,6 +263,8 @@ fn spawn_streaming(
                 st.current_job_id = None;
             }
         }
+        // Force-kill / crash can leave onefile _MEI* behind — scavenge after exit.
+        let _ = cleanup_orphan_mei_dirs();
         let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
         let _ = app_done.emit(
             "engine-event",
@@ -417,6 +475,8 @@ pub async fn cancel_job(state: State<'_, Mutex<EngineState>>, job_id: String) ->
             st.current_job_id = None;
         }
     }
+    // taskkill /F skips PyInstaller bootloader cleanup — scavenge _MEI* now.
+    let _ = cleanup_orphan_mei_dirs();
     Ok(())
 }
 
@@ -601,7 +661,7 @@ pub fn run_engine_capture(args: &[&str]) -> Result<String, String> {
         .stderr(Stdio::piped())
         .env_clear()
         .envs(spawn_env())
-        .current_dir(repo_engine_dir());
+        .current_dir(engine_workdir(&bin));
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -609,6 +669,8 @@ pub fn run_engine_capture(args: &[&str]) -> Result<String, String> {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     let output = cmd.output().map_err(|e| e.to_string())?;
+    // Short-lived onefile spawns often leave _MEI*; reclaim after capture.
+    let _ = cleanup_orphan_mei_dirs();
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

@@ -1,0 +1,15 @@
+{
+  "name": "narration-language-video",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Dub VI — root scripts (build like a web project)",
+  "scripts": {
+    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-desktop-fast.ps1",
+    "build:full": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-desktop.ps1",
+    "build:engine": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-desktop-fast.ps1 -EngineOnly",
+    "build:ui": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-desktop-fast.ps1 -SkipEngine",
+    "verify": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-package.ps1",
+    "dev": "npm --prefix desktop run tauri -- dev",
+    "clean": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/clean-build.ps1"
+  }
+}

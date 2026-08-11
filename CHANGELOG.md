@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Engine PyInstaller chuyển **onedir** (không còn bung `%TEMP%\_MEI*` mỗi lần chạy)
+- Dọn orphan `_MEI*` lúc mở app / sau khi engine thoát / hủy job; script `scripts/cleanup-mei-temp.ps1`
+
 ## 0.1.1 — 2026-07-31
 
 ### Added

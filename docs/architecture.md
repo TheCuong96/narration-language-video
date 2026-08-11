@@ -53,7 +53,9 @@ Uninstall **không** xóa video/output người dùng. AppData có thể giữ l
 ## Đóng gói
 
 1. `download-ffmpeg.ps1` → `resources/bin`
-2. `build-engine.ps1` → PyInstaller → Tauri `externalBin`
+2. `build-engine.ps1` → PyInstaller **onedir** → `desktop/src-tauri/resources/engine/`
 3. `build-desktop.ps1` → Tauri NSIS → `release/DubVI_0.1.0_x64-setup.exe` + `.sha256`
+
+Engine dùng **onedir** (không onefile): onefile mỗi lần chạy bung ~1GB vào `%TEMP%\_MEI*` và thường không xóa khi bị `taskkill /F`. App vẫn dọn orphan `_MEI*` lúc khởi động / sau khi engine thoát. Có thể chạy thủ công: `scripts/cleanup-mei-temp.ps1`.
 
 CUDA **không** nằm trong `requirements-base.txt`.

@@ -11,6 +11,7 @@ desktop/dist/
 desktop/src-tauri/target/
 desktop/src-tauri/binaries/
 desktop/src-tauri/resources/bin/
+desktop/src-tauri/resources/engine/
 resources/bin/
 release/
 *.partial

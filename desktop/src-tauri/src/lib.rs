@@ -262,6 +262,14 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .manage(Mutex::new(EngineState::default()))
+        .setup(|_app| {
+            // Older onefile builds left %TEMP%\_MEI* (~1GB each) after force-kill.
+            let n = engine::cleanup_orphan_mei_dirs();
+            if n > 0 {
+                eprintln!("Dub VI: removed {n} orphan PyInstaller temp folder(s)");
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             pick_videos,
             pick_output_dir,
