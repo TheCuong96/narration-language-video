@@ -7,16 +7,18 @@ from dataclasses import dataclass, field
 from . import events
 from .models import Stage
 
-# Relative weights within one video (sum ~= 100)
+# Relative weights within one video (sum ~= 100).
+# TTS is wall-clock heavy (edge-tts latency / XTTS) — keep weight aligned with
+# real duration so overall % and ETA do not finish "early" before voice gen.
 STAGE_WEIGHTS: dict[str, float] = {
     Stage.INIT.value: 2,
     Stage.EXTRACTING.value: 5,
-    Stage.TRANSCRIBING.value: 40,
-    Stage.TRANSLATING.value: 15,
+    Stage.TRANSCRIBING.value: 28,
+    Stage.TRANSLATING.value: 12,
     Stage.REVIEW.value: 1,
-    Stage.TTS.value: 25,
-    Stage.ALIGNING.value: 8,
-    Stage.MUXING.value: 4,
+    Stage.TTS.value: 70,
+    Stage.ALIGNING.value: 6,
+    Stage.MUXING.value: 3,
     Stage.CLEANUP.value: 1,
 }
 

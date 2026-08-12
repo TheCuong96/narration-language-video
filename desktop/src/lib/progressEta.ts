@@ -6,20 +6,31 @@ import {
 } from "../hooks/useElapsed";
 import type { QueueItem } from "./types";
 
-/** Weights aligned with engine/dubvi/progress.py (display stages). */
+/**
+ * Weights aligned with engine/dubvi/progress.py (display stages).
+ * TTS dominates wall-clock (network Edge-TTS / local XTTS) — keep ~3× the old
+ * share so legend + remaining-time splits match observed duration.
+ */
 export const STAGE_LEGEND = [
   { key: "extracting", label: "Tách audio", weight: 5 },
-  { key: "transcribing", label: "Nhận dạng lời nói", weight: 40 },
-  { key: "translating", label: "Dịch", weight: 15 },
-  { key: "tts", label: "Tạo giọng đọc", weight: 25 },
-  { key: "aligning", label: "Căn giờ", weight: 8 },
-  { key: "muxing", label: "Ghép", weight: 4 },
+  { key: "transcribing", label: "Nhận dạng lời nói", weight: 28 },
+  { key: "translating", label: "Dịch", weight: 12 },
+  { key: "tts", label: "Tạo giọng đọc", weight: 70 },
+  { key: "aligning", label: "Căn giờ", weight: 6 },
+  { key: "muxing", label: "Ghép", weight: 3 },
 ] as const;
 
 const LEGEND_WEIGHT_SUM = STAGE_LEGEND.reduce((a, s) => a + s.weight, 0);
 
-/** Fallback process-time / media-time when no completed files yet. */
-const DEFAULT_PROCESS_RATE = 1.8;
+/** Fallback process-time / media-time when no completed files yet (TTS-heavy). */
+const DEFAULT_PROCESS_RATE = 2.8;
+
+/**
+ * Extra wall-time scale on top of progress weights. TTS live pace is often
+ * optimistic early (short segments / warm connection) — keep a residual factor
+ * that eases toward 1 as the stage progresses.
+ */
+const TTS_EARLY_PACE_FACTOR = 2.6;
 
 export type EtaConfidence = "estimating" | "rough" | "stable";
 
@@ -101,6 +112,65 @@ function mediaDurationOf(item: QueueItem | undefined): number {
   return typeof item.duration_sec === "number" && item.duration_sec > 0
     ? item.duration_sec
     : 0;
+}
+
+function stageIndexOf(stageKey: string): number {
+  return STAGE_LEGEND.findIndex((s) => s.key === stageKey);
+}
+
+/** Effective work completed / total using stage weights (TTS-heavy). */
+function stageWorkProgress(
+  stageKey: string,
+  stagePct: number,
+): { done: number; total: number; activeLeft: number; future: number } {
+  const activeIdx = stageIndexOf(stageKey);
+  const total = LEGEND_WEIGHT_SUM;
+  if (activeIdx < 0) {
+    return { done: 0, total, activeLeft: 0, future: total };
+  }
+  const stageDone = Math.max(0, Math.min(0.99, stagePct / 100));
+  let done = 0;
+  for (let i = 0; i < activeIdx; i++) done += STAGE_LEGEND[i].weight;
+  done += STAGE_LEGEND[activeIdx].weight * stageDone;
+  const activeLeft = STAGE_LEGEND[activeIdx].weight * (1 - stageDone);
+  const future = STAGE_LEGEND.slice(activeIdx + 1).reduce((a, s) => a + s.weight, 0);
+  return { done, total, activeLeft, future };
+}
+
+/**
+ * File remain from elapsed so far vs weighted work left.
+ * Fixes optimistic ETA when early stages are fast but TTS still ahead.
+ */
+function remainFromWeightedPace(
+  fileElapsedSec: number,
+  stageKey: string,
+  stagePct: number,
+): { fileRemain: number | null; stageRemain: number | null; fileTotalEst: number | null } {
+  if (fileElapsedSec < 6 || !stageKey) {
+    return { fileRemain: null, stageRemain: null, fileTotalEst: null };
+  }
+  const { done, total, activeLeft, future } = stageWorkProgress(stageKey, stagePct);
+  if (done < 1) {
+    return { fileRemain: null, stageRemain: null, fileTotalEst: null };
+  }
+  const fileTotalEst = (fileElapsedSec * total) / done;
+  const fileRemain = Math.max(0, Math.round(fileTotalEst - fileElapsedSec));
+  const remainWeight = activeLeft + future;
+  const stageRemain =
+    remainWeight > 0 ? Math.round(fileRemain * (activeLeft / remainWeight)) : 0;
+  return {
+    fileRemain,
+    stageRemain,
+    fileTotalEst: Math.round(fileTotalEst),
+  };
+}
+
+/** Soften optimistic live TTS pace until enough segments have finished. */
+function calibrateTtsLiveRemain(remainSec: number, stagePct: number): number {
+  // factor: ~2.6 early → ~1.0 after most segments
+  const t = Math.max(0, Math.min(1, stagePct / 100));
+  const factor = 1 + (TTS_EARLY_PACE_FACTOR - 1) * Math.pow(1 - t, 1.35);
+  return Math.round(remainSec * factor);
 }
 
 /**
@@ -266,10 +336,15 @@ export function computeProgressEta(input: {
     completedElapsedSec,
   );
 
-  const stageRemainLive = remainFromPercent(stageElapsedSec, stagePct, {
+  const weighted = remainFromWeightedPace(fileElapsedSec, stageKey, stagePct);
+
+  let stageRemainLive = remainFromPercent(stageElapsedSec, stagePct, {
     minElapsed: 4,
     minPercent: 3,
   });
+  if (stageRemainLive != null && stageKey === "tts") {
+    stageRemainLive = calibrateTtsLiveRemain(stageRemainLive, stagePct);
+  }
 
   const fileRemainFromFile = remainFromPercent(fileElapsedSec, filePct, {
     minElapsed: 8,
@@ -296,26 +371,24 @@ export function computeProgressEta(input: {
     }
   }
 
-  // Prefer live progress; seed from media so ETA appears earlier and stays grounded.
-  let fileRemain = blendRemain(fileRemainFromFile, fileRemainFromJob, 0.65);
+  // Prefer weighted pace (knows TTS is still ahead) over raw linear % when available.
+  let fileRemain = blendRemain(weighted.fileRemain, fileRemainFromFile, 0.72);
+  fileRemain = blendRemain(fileRemain, fileRemainFromJob, 0.65);
   fileRemain = blendRemain(fileRemain, seed.fileRemain, fileRemain != null ? 0.7 : 0);
 
-  // Stage remain: live first; else share of file remain by remaining stage weights.
+  // Stage remain: calibrated live TTS first; else weighted share of file remain.
   let stageRemain = stageRemainLive;
+  if (stageRemain == null) {
+    stageRemain = weighted.stageRemain;
+  } else if (weighted.stageRemain != null && stageKey === "tts") {
+    // Keep live signal but never drop far below weight-based TTS remain early on.
+    stageRemain = Math.max(stageRemain, Math.round(weighted.stageRemain * 0.85));
+  }
   if (stageRemain == null && fileRemain != null && stageKey) {
-    const activeIdx = STAGE_LEGEND.findIndex((s) => s.key === stageKey);
-    if (activeIdx >= 0) {
-      const active = STAGE_LEGEND[activeIdx];
-      const stageDone = Math.max(0, Math.min(0.99, stagePct / 100));
-      const activeLeft = active.weight * (1 - stageDone);
-      const futureWeight = STAGE_LEGEND.slice(activeIdx + 1).reduce(
-        (a, s) => a + s.weight,
-        0,
-      );
-      const remainWeight = activeLeft + futureWeight;
-      if (remainWeight > 0) {
-        stageRemain = Math.round(fileRemain * (activeLeft / remainWeight));
-      }
+    const { activeLeft, future } = stageWorkProgress(stageKey, stagePct);
+    const remainWeight = activeLeft + future;
+    if (remainWeight > 0) {
+      stageRemain = Math.round(fileRemain * (activeLeft / remainWeight));
     }
   }
 
@@ -339,7 +412,9 @@ export function computeProgressEta(input: {
   }
 
   let fileTotalEstSec: number | null = null;
-  if (fileRemain != null && filePct > 3) {
+  if (weighted.fileTotalEst != null) {
+    fileTotalEstSec = weighted.fileTotalEst;
+  } else if (fileRemain != null && filePct > 3) {
     fileTotalEstSec = Math.round(fileElapsedSec + fileRemain);
   } else if (fileElapsedSec > 12 && filePct > 5) {
     fileTotalEstSec = Math.round((fileElapsedSec * 100) / filePct);
@@ -348,7 +423,7 @@ export function computeProgressEta(input: {
     fileTotalEstSec = Math.round(seed.fileRemain / Math.max(0.01, 1 - doneFrac));
   }
 
-  const activeIdx = STAGE_LEGEND.findIndex((s) => s.key === stageKey);
+  const activeIdx = stageIndexOf(stageKey);
   const legend: StageLegendEta[] = STAGE_LEGEND.map((s, i) => {
     const estSec =
       fileTotalEstSec != null
