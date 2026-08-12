@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
 import { ErrorDialog } from "./components/ErrorDialog";
 import {
+  attachEngineListener,
   cancelJob,
   continueAfterReview,
   deleteModel,
@@ -9,6 +10,7 @@ import {
   cutSegment,
   downloadUrl,
   filterVideoFiles,
+  getEngineStatus,
   getQueue,
   getSettings,
   listModels,
@@ -554,6 +556,52 @@ export default function App() {
         if (!cancelled) settingsHydratedRef.current = true;
       }
       if (cancelled) return;
+
+      // F5 only reloads the WebView — Rust may still be running a job. Reattach UI.
+      try {
+        const status = await getEngineStatus();
+        if (cancelled) return;
+        if (status.running && status.jobId) {
+          setJobId(status.jobId);
+          jobIdRef.current = status.jobId;
+          setBusy(true);
+          setStageLabel("Đang xử lý (khôi phục sau refresh)…");
+          setCanResume(false);
+          await attachEngineListener(onEngineEventRef.current);
+          try {
+            const q = await getQueue(status.jobId);
+            if (!cancelled && q?.items?.length) {
+              setQueue(
+                q.items.map((it) => ({
+                  ...it,
+                  from_url: urlDownloadedPathsRef.current.has(it.input),
+                })),
+              );
+              setFiles(q.items.map((it) => it.input));
+              setOverallProgress((p) => ({
+                ...p,
+                fileTotal: q.items.length,
+              }));
+            }
+          } catch {
+            /* queue may be mid-write */
+          }
+          pushLog({
+            text: `Đã khôi phục job ${status.jobId} sau refresh (engine vẫn chạy)`,
+          });
+        } else if (status.peerEngineCount > 0) {
+          // Multi-window is supported; only flag leftovers when this window has no live job.
+          pushLog({
+            text:
+              `Phát hiện ${status.peerEngineCount} DubVIEngine còn sót (không thuộc job đang chạy). ` +
+              `Mở nhiều cửa sổ vẫn OK — chỉ End Task các engine thừa nếu GPU đầy / TTS chậm bất thường.`,
+            cls: "warn",
+          });
+        }
+      } catch {
+        /* not in Tauri / older build */
+      }
+
       try {
         setModels(await listModels());
       } catch {
@@ -985,6 +1033,43 @@ export default function App() {
       setErrOpen(true);
       return;
     }
+    // After F5, preferGpu defaults false until settings hydrate — wait so we don't pass --cpu.
+    if (!settingsHydratedRef.current) {
+      try {
+        const s = await getSettings();
+        const merged: AppSettings = { ...defaultSettings, ...s };
+        setSettings(merged);
+        settingsRef.current = merged;
+        setPreferGpu(merged.device_mode === "auto");
+        setModel(merged.whisper_model);
+        setVoice(merged.voice);
+        settingsHydratedRef.current = true;
+      } catch (e) {
+        setErrFriendly({
+          title: "Chưa sẵn sàng",
+          body: "Đang tải cài đặt. Thử Bắt đầu lại sau giây lát.",
+        });
+        setErrTech(String(e));
+        setErrOpen(true);
+        return;
+      }
+    }
+    const useGpu =
+      settingsRef.current.device_mode === "auto" ? true : preferGpu;
+    try {
+      const status = await getEngineStatus();
+      // Intentional multi-window is fine. Only warn on likely leak (many leftovers).
+      if (status.peerEngineCount >= 8) {
+        pushLog({
+          text:
+            `Đang có ${status.peerEngineCount} DubVIEngine — có thể là process sót sau F5. ` +
+            `Mở nhiều cửa sổ vẫn dùng được; nếu GPU đầy hãy End Task các engine không còn cửa sổ tương ứng.`,
+          cls: "warn",
+        });
+      }
+    } catch {
+      /* ignore */
+    }
     setBusy(true);
     sawTerminalRef.current = false;
     userStoppedRef.current = false;
@@ -1016,7 +1101,7 @@ export default function App() {
           mixDb,
           review,
           force,
-          preferGpu,
+          preferGpu: useGpu,
           translateProvider: settings.translate_provider || "deep-translator",
           ttsProvider: settings.tts_provider || "edge-tts",
           xttsSpeakerWav: settings.xtts_speaker_wav || "",

@@ -20,6 +20,22 @@ _xtts_lock = threading.Lock()
 _xtts_cache: dict[str, object] = {}
 
 
+def unload_nllb_model() -> None:
+    """Drop cached NLLB so XTTS can claim VRAM in the same process."""
+    with _nllb_lock:
+        _nllb_cache.clear()
+    try:
+        import gc
+
+        gc.collect()
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception as e:
+        log.warning("NLLB unload failed: %s", e)
+
+
 def _offline_deps_hint(pkg: str) -> str:
     return (
         f"Thiếu gói offline '{pkg}'. Cài: "
@@ -342,6 +358,17 @@ class XttsTtsProvider(TtsProvider):
                     model.cuda()
                 except Exception as e:
                     log.warning("XTTS CUDA failed, fallback CPU: %s", e)
+                    try:
+                        from .. import events
+
+                        events.log(
+                            f"XTTS không dùng được GPU ({e}); chuyển sang CPU — "
+                            "giọng đọc sẽ rất chậm. Kiểm tra VRAM / End Task "
+                            "các DubVIEngine sót (không phải cửa sổ đang chạy).",
+                            level="warn",
+                        )
+                    except Exception:
+                        pass
                     device = "cpu"
             bundle = {
                 "model": model,

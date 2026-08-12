@@ -57,7 +57,7 @@ def _has_vi(work: Path) -> bool:
 
 def process_one(
     video: Path,
-    model,
+    model_box: list,
     cfg: JobConfig,
     job_root: Path,
     cancel: CancellationToken,
@@ -68,7 +68,11 @@ def process_one(
     """
     Process a single video sequentially.
     Returns output path, or None if paused for translation review.
+
+    model_box is a 0/1-item list holding the Whisper model so we can drop the
+    caller's reference before XTTS (needed to actually free VRAM).
     """
+    model = model_box[0] if model_box else None
     name = video.stem
     work = video_work_dir(job_root, name)
     output = queue.output_path_for(video, cfg.output_dir)
@@ -183,6 +187,17 @@ def process_one(
             return None
 
     # --- TTS + align + mux ---
+    # Drop every Python ref to Whisper/NLLB before XTTS so CUDA memory can be freed.
+    if (cfg.tts_provider or "").lower().startswith("xtts"):
+        model_box.clear()
+        model = None
+        transcription.unload_whisper_model()
+        try:
+            from .providers import offline as offline_providers
+
+            offline_providers.unload_nllb_model()
+        except Exception:
+            pass
     return _finish_from_tts(
         video=video,
         work=work,
@@ -416,13 +431,14 @@ def run_job(cfg: JobConfig) -> int:
         events.queue_updated(qdata)
 
         need_model = cfg.start_from not in (StartFrom.TTS, StartFrom.MUX)
-        model = None
+        model_box: list = []
         if need_model:
             # Still may need model if cache missing
-            model, device_info = transcription.load_whisper_model(
+            loaded, device_info = transcription.load_whisper_model(
                 cfg.whisper_model,
                 prefer_gpu=cfg.prefer_gpu,
             )
+            model_box.append(loaded)
             if device_info.fallback_reason:
                 events.log(device_info.fallback_reason, level="warn")
 
@@ -473,15 +489,16 @@ def run_job(cfg: JobConfig) -> int:
             )
             try:
                 cancel.check()
-                # Lazy-load model if first file that needs it
-                if model is None:
-                    model, device_info = transcription.load_whisper_model(
+                # Lazy-load model if first file that needs it (or after XTTS unload)
+                if not model_box:
+                    loaded, device_info = transcription.load_whisper_model(
                         cfg.whisper_model,
                         prefer_gpu=cfg.prefer_gpu,
                     )
+                    model_box.append(loaded)
                 out = process_one(
                     video,
-                    model,
+                    model_box,
                     cfg,
                     job_root,
                     cancel,

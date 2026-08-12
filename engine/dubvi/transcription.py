@@ -106,6 +106,26 @@ def load_whisper_model(
     return model, device_info
 
 
+def unload_whisper_model() -> None:
+    """Release Whisper (and CUDA cache) so XTTS can claim VRAM in the same process."""
+    global _model, _model_key
+    if _model is None:
+        return
+    _model = None
+    _model_key = None
+    try:
+        import gc
+
+        gc.collect()
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        events.log("Đã giải phóng Whisper khỏi GPU/RAM trước bước TTS")
+    except Exception as e:
+        log.warning("Whisper unload / CUDA cache clear failed: %s", e)
+
+
 def transcribe(
     audio_path: Path,
     transcript_path: Path,

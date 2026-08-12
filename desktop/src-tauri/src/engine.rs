@@ -192,12 +192,59 @@ fn emit_line(app: &AppHandle, line: &str) {
     }
 }
 
+fn pid_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        let out = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output();
+        match out {
+            Ok(o) => {
+                let s = String::from_utf8_lossy(&o.stdout);
+                s.contains(&pid.to_string())
+            }
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let out = Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        matches!(out, Ok(st) if st.success())
+    }
+}
+
+/// Kill any previously tracked engine so F5 → Start does not orphan GPU processes.
+fn kill_previous_engine(state: &Arc<Mutex<EngineState>>) {
+    let prev = match state.lock() {
+        Ok(mut st) => st.child_pid.take(),
+        Err(_) => None,
+    };
+    if let Some(pid) = prev {
+        if pid_alive(pid) {
+            kill_pid(pid);
+            // Give the driver a moment to release VRAM before the next CUDA load.
+            thread::sleep(std::time::Duration::from_millis(400));
+        }
+    }
+}
+
 fn spawn_streaming(
     app: AppHandle,
     state: Arc<Mutex<EngineState>>,
     args: Vec<String>,
     job_id: String,
 ) -> Result<(), String> {
+    // Always replace the previous child — UI refresh loses React state but Rust
+    // EngineState (and a live Python process) can survive. Overwriting child_pid
+    // without kill left orphans holding VRAM; later jobs then fall back to CPU.
+    kill_previous_engine(&state);
+
     let (bin, prefix) = engine_command();
     let mut env = spawn_env();
     // Point engine at bundled FFmpeg from Tauri resources when present
@@ -293,11 +340,81 @@ fn state_arc(state: &State<'_, Mutex<EngineState>>) -> Result<Arc<Mutex<EngineSt
     let shared = SHARED.get_or_init(|| Arc::new(Mutex::new(EngineState::default())));
     if let Ok(src) = state.lock() {
         if let Ok(mut dst) = shared.lock() {
-            dst.current_job_id = src.current_job_id.clone();
-            dst.child_pid = src.child_pid;
+            // SHARED is authoritative for the live child (wait-thread clears it on exit).
+            // Never clobber a live shared pid with a stale managed copy after F5/sync races.
+            if dst.current_job_id.is_none() {
+                dst.current_job_id = src.current_job_id.clone();
+            }
+            if dst.child_pid.is_none() {
+                dst.child_pid = src.child_pid;
+            }
         }
     }
     Ok(Arc::clone(shared))
+}
+
+/// Snapshot of the engine child tracked by this app window/process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineStatus {
+    pub job_id: Option<String>,
+    pub child_pid: Option<u32>,
+    pub running: bool,
+    /// Other DubVIEngine processes visible on the machine (multi-window / orphans).
+    pub peer_engine_count: u32,
+}
+
+fn count_peer_engines() -> u32 {
+    #[cfg(windows)]
+    {
+        let out = Command::new("tasklist")
+            .args(["/FI", "IMAGENAME eq DubVIEngine.exe", "/NH"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output();
+        match out {
+            Ok(o) => String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| l.to_ascii_lowercase().contains("dubviengine.exe"))
+                .count() as u32,
+            Err(_) => 0,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        0
+    }
+}
+
+pub async fn get_engine_status(
+    state: State<'_, Mutex<EngineState>>,
+) -> Result<EngineStatus, String> {
+    let shared = state_arc(&state)?;
+    let (job_id, child_pid) = {
+        let st = shared.lock().map_err(|e| e.to_string())?;
+        (st.current_job_id.clone(), st.child_pid)
+    };
+    let running = child_pid.map(pid_alive).unwrap_or(false);
+    if !running {
+        if let Ok(mut st) = shared.lock() {
+            st.child_pid = None;
+            if job_id.is_some() && st.current_job_id == job_id {
+                // Keep job_id so UI can still resume from disk; only clear live pid.
+            }
+        }
+        if let Ok(mut st) = state.lock() {
+            st.child_pid = None;
+        }
+    } else if let Ok(mut st) = state.lock() {
+        st.child_pid = child_pid;
+        st.current_job_id = job_id.clone();
+    }
+    Ok(EngineStatus {
+        job_id,
+        child_pid: if running { child_pid } else { None },
+        running,
+        peer_engine_count: count_peer_engines(),
+    })
 }
 
 pub async fn start_job(
@@ -352,12 +469,14 @@ pub async fn start_job(
     {
         let mut st = state.lock().map_err(|e| e.to_string())?;
         st.current_job_id = Some(job_id.clone());
+        // Keep child_pid so state_arc can merge it into SHARED; spawn kills it first.
     }
     let shared = state_arc(&state)?;
     spawn_streaming(app, shared.clone(), args, job_id.clone())?;
     if let Ok(g) = shared.lock() {
         if let Ok(mut st) = state.lock() {
             st.child_pid = g.child_pid;
+            st.current_job_id = g.current_job_id.clone();
         }
     }
     Ok(job_id)

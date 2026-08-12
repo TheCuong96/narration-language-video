@@ -176,6 +176,23 @@ export async function downloadUrl(
   });
 }
 
+export interface EngineStatus {
+  jobId: string | null;
+  childPid: number | null;
+  running: boolean;
+  /** DubVIEngine processes on this machine (this job + peers/orphans). */
+  peerEngineCount: number;
+}
+
+export async function getEngineStatus(): Promise<EngineStatus> {
+  return invoke<EngineStatus>("get_engine_status");
+}
+
+/** Attach/replace the engine-event listener without starting a job (F5 rehydrate). */
+export async function attachEngineListener(onEvent: EventHandler): Promise<void> {
+  await ensureEngineListen(onEvent);
+}
+
 export async function startJob(options: JobOptions, onEvent: EventHandler): Promise<string> {
   if (!(await isTauri())) throw new Error("Cần Tauri để bắt đầu job");
   await ensureEngineListen(onEvent);

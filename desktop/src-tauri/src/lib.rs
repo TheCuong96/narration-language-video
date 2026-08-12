@@ -156,6 +156,13 @@ async fn url_help() -> Result<Value, String> {
 }
 
 #[tauri::command]
+async fn get_engine_status(
+    state: State<'_, Mutex<EngineState>>,
+) -> Result<engine::EngineStatus, String> {
+    engine::get_engine_status(state).await
+}
+
+#[tauri::command]
 async fn start_job(
     app: AppHandle,
     state: State<'_, Mutex<EngineState>>,
@@ -281,6 +288,7 @@ pub fn run() {
             probe_url,
             download_url,
             url_help,
+            get_engine_status,
             start_job,
             cancel_job,
             retry_failed,
