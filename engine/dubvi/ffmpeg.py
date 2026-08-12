@@ -324,48 +324,64 @@ def stretch_to_duration(
     dst: Path,
     target_sec: float,
     *,
-    allow_spill: bool = True,
-    max_tempo: float = 1.20,
-    min_tempo: float = 0.90,
+    allow_spill: bool = False,
+    max_tempo: float = 8.0,
+    min_tempo: float = 1.0,
     fit_slack: float = 0.0,
 ) -> float:
     """
     Fit audio into target_sec using atempo + pad.
 
-    Prefer near-natural speed: caller should expand target_sec by borrowing
-    silence gaps before relying on tempo. Default max_tempo is mild (~20%).
-
-    If allow_spill and audio is still longer after max speedup, do NOT trim speech —
-    return the actual duration (caller may spill into following gaps).
-    Returns the duration written to dst.
+    - Longer than target → speed up (up to max_tempo; set high for strict slots).
+    - Shorter than target → keep ≥ min_tempo (default 1×) and pad silence.
+    - allow_spill=True keeps leftover length after max speedup (legacy); strict
+      align uses allow_spill=False so output duration == target_sec.
     """
     dst.parent.mkdir(parents=True, exist_ok=True)
+    target = max(float(target_sec), 0.05)
     dur = probe_duration(src)
     if dur <= 0:
-        make_silence(dst, target_sec)
-        return target_sec
+        make_silence(dst, target)
+        return target
 
-    # fit_slack=0 → aim for full target; >0 (e.g. 0.05) leaves a tiny pad margin
+    # Short speech: never slow below min_tempo (1×) — pad to fill the slot.
+    if dur <= target + 0.02:
+        run_ffmpeg(
+            [
+                ffmpeg_path(),
+                "-y",
+                "-i",
+                str(src),
+                "-af",
+                f"apad=whole_dur={target:.3f},atrim=0:{target:.3f}",
+                "-ar",
+                "24000",
+                "-ac",
+                "1",
+                "-c:a",
+                "pcm_s16le",
+                str(dst),
+            ]
+        )
+        actual = probe_duration(dst)
+        return actual if actual > 0 else target
+
     slack = max(0.0, min(fit_slack, 0.5))
-    usable = max(target_sec * (1.0 - slack), 0.05)
+    usable = max(target * (1.0 - slack), 0.05)
     tempo = dur / usable if usable > 0 else 1.0
     tempo = max(min_tempo, min(tempo, max_tempo))
 
     filters = atempo_filter_chain(tempo)
-
     sped_dur = dur / tempo
-    if sped_dur <= target_sec + 0.02:
-        # Pad to exact slot
-        af = ",".join(filters) + f",apad=whole_dur={target_sec:.3f},atrim=0:{target_sec:.3f}"
-        out_dur = target_sec
-    elif allow_spill:
-        # Keep full speech — no atrrim on the end
+
+    if sped_dur <= target + 0.02 or not allow_spill:
+        # Strict fit (default): nail exact slot length.
+        af = ",".join(filters) + f",apad=whole_dur={target:.3f},atrim=0:{target:.3f}"
+        out_dur = target
+    else:
+        # Legacy spill: keep full speech after capped speedup.
         af = ",".join(filters)
         out_dur = sped_dur
-    else:
-        # Legacy hard trim (not preferred)
-        af = ",".join(filters) + f",atrim=0:{target_sec:.3f},apad=whole_dur={target_sec:.3f}"
-        out_dur = target_sec
 
     run_ffmpeg(
         [
@@ -384,7 +400,6 @@ def stretch_to_duration(
             str(dst),
         ]
     )
-    # Verify
     actual = probe_duration(dst)
     return actual if actual > 0 else out_dur
 

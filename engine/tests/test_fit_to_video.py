@@ -62,8 +62,8 @@ def test_fit_audio_handles_inplace(tmp_path: Path):
     assert 1.45 <= actual <= 1.55
 
 
-def test_build_narration_speeds_up_when_timeline_exceeds_video(tmp_path: Path):
-    """Dense VI TTS longer than video must still produce narration ≤ video length."""
+def test_build_narration_fits_each_slot_to_original_times(tmp_path: Path):
+    """Long VI TTS must speed into EN slots — narration stays ≤ video, no spill drift."""
     from dubvi.audio import build_narration
     from dubvi.ffmpeg import probe_duration
     from dubvi.models import Segment
@@ -73,22 +73,28 @@ def test_build_narration_speeds_up_when_timeline_exceeds_video(tmp_path: Path):
     segs_dir = work / "segments"
     segs_dir.mkdir()
 
-    # Two back-to-back 1s slots; each TTS is ~1.8s → spill pushes past 2.1s video
+    # Two slots with a gap; each TTS is longer than its slot
     segments = [
         Segment(id=0, start=0.0, end=1.0, text_en="a", text_vi="aaaa"),
-        Segment(id=1, start=1.05, end=2.05, text_en="b", text_vi="bbbb"),
+        Segment(id=1, start=1.5, end=2.5, text_en="b", text_vi="bbbb"),
     ]
     mp3s: dict[int, Path] = {}
     for sid, dur in ((0, 1.8), (1, 1.8)):
         p = segs_dir / f"{sid:04d}.mp3"
-        # Write wav then rename path as .mp3 — ffmpeg accepts wav content via path;
-        # stretch_to_duration uses ffmpeg -i so extension is irrelevant.
         _make_tone(p, dur, freq=330 + sid * 40)
         mp3s[sid] = p
 
-    video_duration = 2.1
+    video_duration = 3.0
     narration = build_narration(segments, work, video_duration, mp3s)
     narr_dur = probe_duration(narration)
 
     assert narr_dur <= video_duration + 0.08
     assert narr_dur > video_duration * 0.85
+
+    # Fitted pieces must match slot lengths (1.0s each), not natural 1.8s
+    from dubvi import cache
+
+    fitted0 = work / cache.FITTED_DIR / "0000.wav"
+    fitted1 = work / cache.FITTED_DIR / "0001.wav"
+    assert 0.95 <= probe_duration(fitted0) <= 1.05
+    assert 0.95 <= probe_duration(fitted1) <= 1.05

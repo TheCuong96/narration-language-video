@@ -226,10 +226,10 @@ def _finish_from_tts(
     cancel.check()
     if cfg.start_from == StartFrom.MUX and (work / cache.NARRATION).exists():
         narration = work / cache.NARRATION
-        events.log("Dùng cache narration.wav")
+        events.log("Dùng cache narration")
         if tracker:
             tracker.begin_stage(Stage.TTS, "Dùng cache narration")
-            tracker.emit(1, 1, "Đã có narration.wav")
+            tracker.emit(1, 1, "Đã có narration")
             tracker.begin_stage(Stage.ALIGNING, "Bỏ qua căn giờ (đã có narration)")
             tracker.emit(1, 1, "OK")
     else:

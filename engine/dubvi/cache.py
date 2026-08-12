@@ -16,10 +16,10 @@ TRANSCRIPT_EN = "transcript_en.json"
 TRANSCRIPT_VI = "transcript_vi.json"
 SCRIPT_VI = "script_vi.txt"
 AUDIO_FLAC = "audio.flac"
-NARRATION = "narration.wav"
+NARRATION = "narration_slot.wav"
 SEGMENTS_DIR = "segments"
-# Soft-tempo aligner output (invalidates older 1.55× "fitted/" cache)
-FITTED_DIR = "fitted_soft"
+# Strict slot-fit aligner (invalidates older fitted/ / fitted_soft/ caches)
+FITTED_DIR = "fitted_slot"
 
 
 def save_json(path: Path, data: Any) -> None:
