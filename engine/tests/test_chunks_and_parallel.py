@@ -10,7 +10,11 @@ from dubvi.chunks import (
     should_use_chunks,
 )
 from dubvi.models import JobConfig, Segment, StartFrom
-from dubvi.tts import default_tts_concurrency
+from dubvi.tts import (
+    AdaptiveTtsPool,
+    default_tts_concurrency,
+    resolve_adaptive_max,
+)
 
 
 def test_plan_chunks_short_video():
@@ -51,8 +55,34 @@ def test_should_use_chunks_respects_start_from():
 
 
 def test_default_tts_concurrency():
-    assert default_tts_concurrency("edge-tts") == 10
+    assert default_tts_concurrency("edge-tts") == 16
     assert default_tts_concurrency("xtts-v2", prefer_gpu=True) == 1
+
+
+def test_resolve_adaptive_max():
+    assert resolve_adaptive_max("edge-tts", segment_count=200) == 96
+    assert resolve_adaptive_max("edge-tts", max_concurrency=40, segment_count=200) == 40
+    assert resolve_adaptive_max("edge-tts", segment_count=10) == 10
+
+
+def test_adaptive_pool_ramps_and_backs_off():
+    async def _run():
+        pool = AdaptiveTtsPool(initial=8, minimum=4, maximum=32)
+        await pool.acquire()
+        await pool.release(ok=True, latency_sec=0.5)
+        await pool.acquire()
+        await pool.acquire()
+        await pool.acquire()
+        await pool.release(ok=True, latency_sec=0.4)
+        await pool.release(ok=True, latency_sec=0.3)
+        await pool.release(ok=True, latency_sec=0.2)
+        assert pool.limit >= 8
+        old = pool.limit
+        await pool.acquire()
+        await pool.release(ok=False, latency_sec=2.0)
+        assert pool.limit <= old
+
+    asyncio.run(_run())
 
 
 def test_synthesize_all_runs_concurrently(tmp_path):

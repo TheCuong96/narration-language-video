@@ -364,27 +364,49 @@ export function SettingsPage({
           </select>
         </div>
         {settings.tts_provider === "edge-tts" && (
-          <div className="row">
-            <label>TTS song song (edge-tts)</label>
-            <input
-              type="number"
-              min={1}
-              max={20}
-              step={1}
-              value={settings.tts_concurrency ?? 0}
-              onChange={(e) =>
-                onChange({
-                  ...settings,
-                  tts_concurrency: Math.max(0, parseInt(e.target.value, 10) || 0),
-                })
-              }
-            />
-            <p className="muted">
-              Số request TTS gọi cùng lúc. <strong>0 = tự động (10)</strong>. Mỗi đoạn
-              thoại = 1 request — tăng số này giúp video dài nhanh hơn; nếu bị lỗi mạng
-              hãy giảm xuống 5–8.
-            </p>
-          </div>
+          <>
+            <div className="row">
+              <label>TTS song song</label>
+              <input
+                type="number"
+                min={0}
+                max={96}
+                step={1}
+                value={settings.tts_concurrency ?? 0}
+                onChange={(e) =>
+                  onChange({
+                    ...settings,
+                    tts_concurrency: Math.max(0, parseInt(e.target.value, 10) || 0),
+                  })
+                }
+              />
+              <p className="muted">
+                <strong>0 = tự động theo tốc độ Internet</strong> (khuyên dùng): app đo mạng
+                rồi gửi nhiều request TTS nhất có thể, tự tăng/giảm khi lỗi. Nhập số cố
+                định (vd. 20) nếu muốn giới hạn thủ công.
+              </p>
+            </div>
+            <div className="row">
+              <label>Trần TTS (tự động)</label>
+              <input
+                type="number"
+                min={0}
+                max={96}
+                step={1}
+                value={settings.tts_max_concurrency ?? 0}
+                onChange={(e) =>
+                  onChange({
+                    ...settings,
+                    tts_max_concurrency: Math.max(0, parseInt(e.target.value, 10) || 0),
+                  })
+                }
+              />
+              <p className="muted">
+                Giới hạn tối đa khi chế độ tự động. <strong>0 = 96 request</strong> (mạng
+                nhanh). Giảm xuống 30–40 nếu hay bị timeout.
+              </p>
+            </div>
+          </>
         )}
         {offlineTts && (
           <>

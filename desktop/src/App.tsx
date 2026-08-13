@@ -86,6 +86,7 @@ const defaultSettings: AppSettings = {
   tts_provider: "edge-tts",
   xtts_speaker_wav: "",
   tts_concurrency: 0,
+  tts_max_concurrency: 0,
 };
 
 const LS_OUTPUT_DIR = "dubvi.default_output_dir";
@@ -1107,6 +1108,7 @@ export default function App() {
           ttsProvider: settings.tts_provider || "edge-tts",
           xttsSpeakerWav: settings.xtts_speaker_wav || "",
           ttsConcurrency: settings.tts_concurrency ?? 0,
+          ttsMaxConcurrency: settings.tts_max_concurrency ?? 0,
         },
         onEngineEvent,
       );

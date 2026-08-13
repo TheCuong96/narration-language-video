@@ -180,7 +180,8 @@ class JobConfig:
     chunk_duration_sec: float = 300.0
     chunk_min_duration_sec: float = 600.0
     chunk_workers: int = 0  # 0 = auto
-    tts_concurrency: int = 0  # 0 = auto per provider
+    tts_concurrency: int = 0  # 0 = adaptive (edge-tts); >0 = fixed workers
+    tts_max_concurrency: int = 0  # 0 = auto cap (96); adaptive upper bound
     translate_concurrency: int = 0  # 0 = auto per provider
 
     @property

@@ -302,6 +302,7 @@ def _finish_from_tts(
                 speaker_wav=cfg.xtts_speaker_wav,
                 language=cfg.target_lang or "vi",
                 concurrency=cfg.tts_concurrency,
+                max_concurrency=cfg.tts_max_concurrency,
             )
         )
         cancel.check()

@@ -70,7 +70,13 @@ def _add_run_shared(p: argparse.ArgumentParser) -> None:
         "--tts-concurrency",
         type=int,
         default=None,
-        help="Số request TTS song song (edge-tts mặc định 10, 0=auto)",
+        help="Số request TTS cố định (0=thích ứng theo mạng, mặc định)",
+    )
+    p.add_argument(
+        "--tts-max-concurrency",
+        type=int,
+        default=None,
+        help="Trần request TTS khi thích ứng (0=96, mặc định)",
     )
     p.add_argument(
         "--translate-concurrency",
@@ -254,6 +260,9 @@ def _cfg_from_run(args: argparse.Namespace) -> JobConfig:
     translate_conc = args.translate_concurrency
     if translate_conc is None:
         translate_conc = getattr(settings, "translate_concurrency", 0) or 0
+    tts_max = getattr(args, "tts_max_concurrency", None)
+    if tts_max is None:
+        tts_max = getattr(settings, "tts_max_concurrency", 0) or 0
     return JobConfig(
         input_dir=input_dir,
         input_files=files,
@@ -278,6 +287,7 @@ def _cfg_from_run(args: argparse.Namespace) -> JobConfig:
         tts_provider=tts_provider,
         xtts_speaker_wav=xtts_speaker or "",
         tts_concurrency=int(tts_conc or 0),
+        tts_max_concurrency=int(tts_max or 0),
         translate_concurrency=int(translate_conc or 0),
     )
 

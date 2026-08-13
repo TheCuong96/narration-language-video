@@ -33,6 +33,8 @@ pub struct JobOptions {
     pub xtts_speaker_wav: String,
     #[serde(default)]
     pub tts_concurrency: u32,
+    #[serde(default)]
+    pub tts_max_concurrency: u32,
 }
 
 fn default_translate_provider() -> String {
@@ -471,6 +473,10 @@ pub async fn start_job(
         args.push("--tts-concurrency".into());
         args.push(options.tts_concurrency.to_string());
     }
+    if options.tts_max_concurrency > 0 {
+        args.push("--tts-max-concurrency".into());
+        args.push(options.tts_max_concurrency.to_string());
+    }
 
     {
         let mut st = state.lock().map_err(|e| e.to_string())?;
@@ -524,6 +530,7 @@ fn default_settings_json() -> Value {
         "tts_provider": "edge-tts",
         "xtts_speaker_wav": "",
         "tts_concurrency": 0,
+        "tts_max_concurrency": 0,
     })
 }
 
