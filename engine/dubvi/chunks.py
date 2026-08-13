@@ -214,7 +214,7 @@ def process_early_stages_chunked(
     events.log(label)
     if tracker:
         tracker.begin_stage(Stage.TRANSCRIBING, label)
-        tracker.emit(0, len(plans), "Đang phân tích theo phần…")
+        tracker.emit_chunk_early_progress(0, len(plans), "Đang phân tích theo phần…")
 
     groups_en: list[list[Segment]] = [[] for _ in plans]
     groups_vi: list[list[Segment]] = [[] for _ in plans]
@@ -228,7 +228,7 @@ def process_early_stages_chunked(
         msg = f"Xong phần {done}/{len(plans)} ({plan.start_sec / 60:.0f}–{plan.end_sec / 60:.0f} phút)"
         events.log(msg)
         if tracker:
-            tracker.emit(done, len(plans), msg)
+            tracker.emit_chunk_early_progress(done, len(plans), msg)
 
     if len(plans) == 1 or workers == 1:
         for plan in plans:
@@ -273,5 +273,7 @@ def process_early_stages_chunked(
     cache.save_segments(work / cache.TRANSCRIPT_VI, segments_vi)
 
     if tracker:
-        tracker.emit(len(plans), len(plans), f"Đã ghép {len(segments_en)} đoạn từ {len(plans)} phần")
+        tracker.emit_chunk_early_progress(
+            len(plans), len(plans), f"Đã ghép {len(segments_en)} đoạn từ {len(plans)} phần"
+        )
     return segments_en, segments_vi

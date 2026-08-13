@@ -31,6 +31,7 @@ import {
   urlHelp as fetchUrlHelp,
   type UrlHelpInfo,
 } from "./lib/engine";
+import { computeOverallPercentFromStage } from "./lib/progressEta";
 import type {
   AppSettings,
   AudioMode,
@@ -356,7 +357,12 @@ export default function App() {
           const overallPct =
             typeof ev.overall_percent === "number"
               ? ev.overall_percent
-              : stagePct;
+              : computeOverallPercentFromStage(
+                  String(ev.stage || ""),
+                  stagePct,
+                  (ev.file_index as number) || 1,
+                  (ev.file_total as number) || 1,
+                );
           setFileProgress({
             current: ev.current || 0,
             total: ev.total || 0,

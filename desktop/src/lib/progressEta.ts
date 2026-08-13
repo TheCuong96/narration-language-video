@@ -22,6 +22,28 @@ export const STAGE_LEGEND = [
 
 const LEGEND_WEIGHT_SUM = STAGE_LEGEND.reduce((a, s) => a + s.weight, 0);
 
+/** Mirror engine/dubvi/progress.py overall_from_stage_fracs (6 stages, sum weights = 124). */
+export function computeOverallPercentFromStage(
+  stageKey: string,
+  stagePct: number,
+  fileIndex: number,
+  fileTotal: number,
+): number {
+  const idx = stageIndexOf(stageKey);
+  const frac = Math.max(0, Math.min(100, stagePct)) / 100;
+  let done = 0;
+  if (idx >= 0) {
+    for (let i = 0; i < idx; i++) done += STAGE_LEGEND[i].weight;
+    done += STAGE_LEGEND[idx].weight * frac;
+  }
+  const within = (100 * done) / LEGEND_WEIGHT_SUM;
+  const idx1 = Math.max(1, fileIndex);
+  const total = Math.max(1, fileTotal);
+  const base = total > 1 ? (100 * (idx1 - 1)) / total : 0;
+  const span = total > 1 ? 100 / total : 100;
+  return Math.round((base + (span * within) / 100) * 10) / 10;
+}
+
 /** Fallback process-time / media-time when no completed files yet (TTS-heavy). */
 const DEFAULT_PROCESS_RATE = 2.8;
 
