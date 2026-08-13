@@ -391,7 +391,16 @@ def continue_stem(cfg: JobConfig, stem: str) -> int:
         duration = probe_duration(video)
         output = Path(item["output"])
         queue.update_item(jid, stem, status=QueueItemStatus.RUNNING)
-        tracker = ProgressTracker(file_index=0, file_total=1, file_name=video.name)
+        qitems = list(q.get("items") or []) if q else []
+        try:
+            idx0 = next(i for i, queued in enumerate(qitems) if queued.get("stem") == stem)
+        except StopIteration:
+            idx0 = 0
+        tracker = ProgressTracker(
+            file_index=idx0,
+            file_total=max(len(qitems), 1),
+            file_name=video.name,
+        )
         # Assume earlier stages done when continuing from review
         for st in (
             Stage.INIT,

@@ -91,6 +91,8 @@ def build_narration(
     """
     narration = work / cache.NARRATION
     if narration.exists() and narration.stat().st_size > 0:
+        if tracker:
+            tracker.begin_stage(Stage.ALIGNING, "Kiểm tra narration đã căn giờ trong cache")
         events.log("Dùng cache narration")
         narr_dur = probe_duration(narration)
         if narr_dur > video_duration + 0.05 and video_duration > 0.05:
@@ -110,6 +112,8 @@ def build_narration(
             tmp = work / "narration.__pad__.wav"
             concat_wavs([narration, pad], work / "concat_cache_pad.txt", tmp)
             tmp.replace(narration)
+        if tracker:
+            tracker.emit(1, 1, "Đã kiểm tra căn giờ từ cache")
         return narration
 
     fitted_dir = work / cache.FITTED_DIR

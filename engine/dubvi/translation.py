@@ -150,6 +150,9 @@ def translate_segments(
             tracker.emit(1, 1, "Đã có bản dịch trong cache")
         return cached
 
+    if tracker:
+        tracker.begin_stage(Stage.TRANSLATING, "Đang chuẩn bị bộ dịch…")
+
     from .providers import get_translate_provider
 
     src = "auto" if source_lang in ("", "auto") else source_lang

@@ -22,6 +22,24 @@ export const STAGE_LEGEND = [
 
 const LEGEND_WEIGHT_SUM = STAGE_LEGEND.reduce((a, s) => a + s.weight, 0);
 
+/** Weighted job percent from the engine's monotonic per-stage fractions. */
+export function computeOverallPercentFromFractions(
+  stageFractions: Record<string, number>,
+  fileIndex: number,
+  fileTotal: number,
+): number {
+  const done = STAGE_LEGEND.reduce((sum, stage) => {
+    const frac = Math.max(0, Math.min(1, Number(stageFractions[stage.key]) || 0));
+    return sum + stage.weight * frac;
+  }, 0);
+  const within = (100 * done) / LEGEND_WEIGHT_SUM;
+  const idx1 = Math.max(1, fileIndex);
+  const total = Math.max(1, fileTotal);
+  const base = total > 1 ? (100 * (idx1 - 1)) / total : 0;
+  const span = total > 1 ? 100 / total : 100;
+  return Math.round((base + (span * within) / 100) * 10) / 10;
+}
+
 /** Mirror engine/dubvi/progress.py overall_from_stage_fracs (6 stages, sum weights = 124). */
 export function computeOverallPercentFromStage(
   stageKey: string,
@@ -31,17 +49,12 @@ export function computeOverallPercentFromStage(
 ): number {
   const idx = stageIndexOf(stageKey);
   const frac = Math.max(0, Math.min(100, stagePct)) / 100;
-  let done = 0;
+  const stageFractions: Record<string, number> = {};
   if (idx >= 0) {
-    for (let i = 0; i < idx; i++) done += STAGE_LEGEND[i].weight;
-    done += STAGE_LEGEND[idx].weight * frac;
+    for (let i = 0; i < idx; i++) stageFractions[STAGE_LEGEND[i].key] = 1;
+    stageFractions[STAGE_LEGEND[idx].key] = frac;
   }
-  const within = (100 * done) / LEGEND_WEIGHT_SUM;
-  const idx1 = Math.max(1, fileIndex);
-  const total = Math.max(1, fileTotal);
-  const base = total > 1 ? (100 * (idx1 - 1)) / total : 0;
-  const span = total > 1 ? 100 / total : 100;
-  return Math.round((base + (span * within) / 100) * 10) / 10;
+  return computeOverallPercentFromFractions(stageFractions, fileIndex, fileTotal);
 }
 
 /** Fallback process-time / media-time when no completed files yet (TTS-heavy). */
@@ -82,6 +95,9 @@ export type StageLegendEta = {
   /** Remaining for active stage; full est for future; null when done. */
   remainSec: number | null;
   remainLabel: string | null;
+  /** Actual wall time measured by the engine for this stage so far. */
+  actualSec: number | null;
+  actualLabel: string | null;
   active: boolean;
   done: boolean;
 };
@@ -99,6 +115,9 @@ export type ProgressEta = {
   confidenceLabel: string;
   /** Short status under the headline finish time. */
   summaryLabel: string | null;
+  /** Sum of measured wall time in the six main stages. */
+  measuredSec: number;
+  measuredLabel: string | null;
 };
 
 function blendRemain(a: number | null, b: number | null, aWeight = 0.55): number | null {
@@ -309,6 +328,10 @@ export function computeProgressEta(input: {
   queue: QueueItem[];
   /** Wall seconds for each completed file in this job (from engine). */
   completedElapsedSec: number[];
+  /** Actual seconds measured by the engine for each main stage. */
+  stageDurationsSec: Record<string, number>;
+  /** Monotonic 0..1 completion fraction for each main stage. */
+  stageFractions: Record<string, number>;
 }): ProgressEta {
   const {
     busy,
@@ -322,18 +345,39 @@ export function computeProgressEta(input: {
     fileTotal,
     queue,
     completedElapsedSec,
+    stageDurationsSec,
+    stageFractions,
   } = input;
 
+  const measuredSec = STAGE_LEGEND.reduce(
+    (sum, stage) => sum + Math.max(0, Number(stageDurationsSec[stage.key]) || 0),
+    0,
+  );
+  const measuredActiveSec = Math.max(0, Number(stageDurationsSec[stageKey]) || 0);
+  const effectiveStageElapsedSec = Math.max(stageElapsedSec, measuredActiveSec);
+  const effectiveFileElapsedSec = Math.max(fileElapsedSec, measuredSec);
+
   const stageName = stageLabelOf(stageKey);
-  const emptyLegend = STAGE_LEGEND.map((s) => ({
-    ...s,
-    estSec: null as number | null,
-    estLabel: null as string | null,
-    remainSec: null as number | null,
-    remainLabel: null as string | null,
-    active: false,
-    done: false,
-  }));
+  const emptyLegend = STAGE_LEGEND.map((s) => {
+    const actualSec = Math.max(0, Number(stageDurationsSec[s.key]) || 0) || null;
+    const done = (Number(stageFractions[s.key]) || 0) >= 0.999;
+    return {
+      ...s,
+      estSec: null as number | null,
+      estLabel: null as string | null,
+      remainSec: null as number | null,
+      remainLabel: null as string | null,
+      actualSec,
+      actualLabel:
+        actualSec != null
+          ? done
+            ? `xong trong ${formatDurationVi(actualSec)}`
+            : `đã chạy ${formatDurationVi(actualSec)}`
+          : null,
+      active: false,
+      done,
+    };
+  });
 
   const empty: ProgressEta = {
     stage: null,
@@ -345,6 +389,8 @@ export function computeProgressEta(input: {
     confidence: "estimating",
     confidenceLabel: "",
     summaryLabel: null,
+    measuredSec,
+    measuredLabel: measuredSec > 0 ? formatDurationVi(measuredSec) : null,
   };
 
   if (!busy && overallPct < 100) return empty;
@@ -358,9 +404,9 @@ export function computeProgressEta(input: {
     completedElapsedSec,
   );
 
-  const weighted = remainFromWeightedPace(fileElapsedSec, stageKey, stagePct);
+  const weighted = remainFromWeightedPace(effectiveFileElapsedSec, stageKey, stagePct);
 
-  let stageRemainLive = remainFromPercent(stageElapsedSec, stagePct, {
+  let stageRemainLive = remainFromPercent(effectiveStageElapsedSec, stagePct, {
     minElapsed: 4,
     minPercent: 3,
   });
@@ -368,7 +414,7 @@ export function computeProgressEta(input: {
     stageRemainLive = calibrateTtsLiveRemain(stageRemainLive, stagePct);
   }
 
-  const fileRemainFromFile = remainFromPercent(fileElapsedSec, filePct, {
+  const fileRemainFromFile = remainFromPercent(effectiveFileElapsedSec, filePct, {
     minElapsed: 8,
     minPercent: 3,
   });
@@ -437,9 +483,9 @@ export function computeProgressEta(input: {
   if (weighted.fileTotalEst != null) {
     fileTotalEstSec = weighted.fileTotalEst;
   } else if (fileRemain != null && filePct > 3) {
-    fileTotalEstSec = Math.round(fileElapsedSec + fileRemain);
-  } else if (fileElapsedSec > 12 && filePct > 5) {
-    fileTotalEstSec = Math.round((fileElapsedSec * 100) / filePct);
+    fileTotalEstSec = Math.round(effectiveFileElapsedSec + fileRemain);
+  } else if (effectiveFileElapsedSec > 12 && filePct > 5) {
+    fileTotalEstSec = Math.round((effectiveFileElapsedSec * 100) / filePct);
   } else if (seed.fileRemain != null) {
     const doneFrac = Math.max(0, Math.min(0.99, filePct / 100));
     fileTotalEstSec = Math.round(seed.fileRemain / Math.max(0.01, 1 - doneFrac));
@@ -451,8 +497,11 @@ export function computeProgressEta(input: {
       fileTotalEstSec != null
         ? Math.round((fileTotalEstSec * s.weight) / LEGEND_WEIGHT_SUM)
         : null;
-    const done = activeIdx >= 0 ? i < activeIdx : false;
+    const confirmedFrac = Math.max(0, Math.min(1, Number(stageFractions[s.key]) || 0));
+    const done = confirmedFrac >= 0.999 || (activeIdx >= 0 ? i < activeIdx : false);
     const active = s.key === stageKey;
+    const measured = Math.max(0, Number(stageDurationsSec[s.key]) || 0);
+    const actualSec = measured > 0 ? measured : null;
     let remainSec: number | null = null;
     if (done) remainSec = 0;
     else if (active && stageRemain != null) remainSec = stageRemain;
@@ -470,6 +519,13 @@ export function computeProgressEta(input: {
               ? `còn ${formatDurationVi(remainSec)}`
               : `khoảng ${formatDurationVi(remainSec)}`
           : null,
+      actualSec,
+      actualLabel:
+        actualSec != null
+          ? active && !done
+            ? `đã chạy ${formatDurationVi(actualSec)}`
+            : `xong trong ${formatDurationVi(actualSec)}`
+          : null,
       active,
       done,
     };
@@ -478,7 +534,7 @@ export function computeProgressEta(input: {
   if (stageRemain != null && activeIdx >= 0) {
     const full =
       stagePct > 3
-        ? Math.round(stageElapsedSec + stageRemain)
+        ? Math.round(effectiveStageElapsedSec + stageRemain)
         : legend[activeIdx].estSec;
     if (full != null) {
       legend[activeIdx] = {
@@ -507,5 +563,7 @@ export function computeProgressEta(input: {
     confidence: conf.level,
     confidenceLabel: conf.label,
     summaryLabel,
+    measuredSec,
+    measuredLabel: measuredSec > 0 ? formatDurationVi(measuredSec) : null,
   };
 }

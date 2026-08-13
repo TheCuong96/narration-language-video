@@ -31,7 +31,10 @@ import {
   urlHelp as fetchUrlHelp,
   type UrlHelpInfo,
 } from "./lib/engine";
-import { computeOverallPercentFromStage } from "./lib/progressEta";
+import {
+  computeOverallPercentFromFractions,
+  computeOverallPercentFromStage,
+} from "./lib/progressEta";
 import type {
   AppSettings,
   AudioMode,
@@ -165,6 +168,8 @@ export default function App() {
     fileTotal: 0,
     fileName: "",
   });
+  const [stageDurationsSec, setStageDurationsSec] = useState<Record<string, number>>({});
+  const [stageFractions, setStageFractions] = useState<Record<string, number>>({});
   /** Wall-clock seconds for each completed file in the current job. */
   const [completedElapsedSec, setCompletedElapsedSec] = useState<number[]>([]);
   const [reviewStem, setReviewStem] = useState<string | null>(null);
@@ -208,6 +213,12 @@ export default function App() {
   const dirsTouchedRef = useRef({ output: false, download: false });
   const busyRef = useRef(false);
   const jobIdRef = useRef<string | null>(null);
+  /** Highest total shown for this job; progress may advance but never retreat. */
+  const overallFloorRef = useRef(0);
+  /** Latest live queue size, including videos appended while a file is running. */
+  const queueTotalRef = useRef(0);
+  /** Reset per-stage measurements exactly when the engine moves to another file. */
+  const timingFileRef = useRef("");
   /** Files dropped while startJob is in-flight (busy but jobId not ready yet). */
   const pendingEnqueueRef = useRef<string[]>([]);
   const onEngineEventRef = useRef<(ev: EngineEvent) => void>(() => {});
@@ -297,6 +308,7 @@ export default function App() {
     (ev: EngineEvent) => {
       pushLog(friendlyLine(ev));
       if (ev.type === "queue_updated" && ev.queue?.items) {
+        queueTotalRef.current = ev.queue.items.length;
         setQueue((prev) => {
           const meta = new Map(prev.map((p) => [p.stem, p]));
           return ev.queue!.items.map((it) => {
@@ -338,8 +350,10 @@ export default function App() {
             stageLabel: (ev.stage_label as string) || "Tải video",
             stage: ev.stage || "downloading_video",
           });
+          const monotonicPct = Math.max(overallFloorRef.current, stagePct);
+          overallFloorRef.current = monotonicPct;
           setOverallProgress({
-            percent: stagePct,
+            percent: monotonicPct,
             fileIndex: 1,
             fileTotal: 1,
             fileName: "",
@@ -354,15 +368,55 @@ export default function App() {
               : ev.total
                 ? Math.round((100 * (ev.current || 0)) / ev.total)
                 : 0;
-          const overallPct =
-            typeof ev.overall_percent === "number"
+          const rawDurations = ev.stage_durations_sec || {};
+          const rawFractions = ev.stage_fracs || {};
+          const latestFileTotal = Math.max(
+            1,
+            Number(ev.file_total) || 0,
+            queueTotalRef.current,
+          );
+          const reportedOverallPct =
+            Object.keys(rawFractions).length > 0
+              ? computeOverallPercentFromFractions(
+                  rawFractions,
+                  Number(ev.file_index) || 1,
+                  latestFileTotal,
+                )
+              : typeof ev.overall_percent === "number"
               ? ev.overall_percent
               : computeOverallPercentFromStage(
                   String(ev.stage || ""),
                   stagePct,
                   (ev.file_index as number) || 1,
-                  (ev.file_total as number) || 1,
+                  latestFileTotal,
                 );
+          const overallPct = Math.max(
+            overallFloorRef.current,
+            Math.max(0, Math.min(100, reportedOverallPct)),
+          );
+          overallFloorRef.current = overallPct;
+
+          const timingKey = `${Number(ev.file_index) || 0}:${String(ev.file || "")}`;
+          if (timingKey !== timingFileRef.current) {
+            timingFileRef.current = timingKey;
+            setStageDurationsSec({ ...rawDurations });
+            setStageFractions({ ...rawFractions });
+          } else {
+            setStageDurationsSec((previous) => {
+              const next = { ...previous };
+              for (const [key, value] of Object.entries(rawDurations)) {
+                if (Number.isFinite(value)) next[key] = Math.max(next[key] || 0, value);
+              }
+              return next;
+            });
+            setStageFractions((previous) => {
+              const next = { ...previous };
+              for (const [key, value] of Object.entries(rawFractions)) {
+                if (Number.isFinite(value)) next[key] = Math.max(next[key] || 0, value);
+              }
+              return next;
+            });
+          }
           setFileProgress({
             current: ev.current || 0,
             total: ev.total || 0,
@@ -374,7 +428,7 @@ export default function App() {
           setOverallProgress({
             percent: overallPct,
             fileIndex: (ev.file_index as number) || 0,
-            fileTotal: (ev.file_total as number) || 0,
+            fileTotal: latestFileTotal,
             fileName: (ev.file as string) || "",
           });
           if (ev.message || ev.stage_label) {
@@ -400,6 +454,7 @@ export default function App() {
         }
       }
       if (ev.type === "completed") {
+        overallFloorRef.current = 100;
         setOverallProgress((p) => ({ ...p, percent: 100 }));
         setFileProgress((p) => ({ ...p, percent: 100, message: "Hoàn tất" }));
         setStageLabel("Hoàn tất");
@@ -579,6 +634,7 @@ export default function App() {
           try {
             const q = await getQueue(status.jobId);
             if (!cancelled && q?.items?.length) {
+              queueTotalRef.current = q.items.length;
               setQueue(
                 q.items.map((it) => ({
                   ...it,
@@ -679,6 +735,7 @@ export default function App() {
               : "Video đã có trong hàng đợi",
         });
         if (result.queue?.items?.length) {
+          queueTotalRef.current = result.queue.items.length;
           const probedNew = await probeVideos(added).catch(() => null);
           const probeMap = new Map(
             (probedNew || []).map((p) => [p.path, p] as const),
@@ -837,6 +894,11 @@ export default function App() {
     sawTerminalRef.current = false;
     userStoppedRef.current = false;
     setCanResume(false);
+    overallFloorRef.current = 0;
+    queueTotalRef.current = 1;
+    timingFileRef.current = "";
+    setStageDurationsSec({});
+    setStageFractions({});
     setStageLabel("Đang tải video từ URL…");
     setFileProgress({
       current: 0,
@@ -1083,6 +1145,11 @@ export default function App() {
     userStoppedRef.current = false;
     setCanResume(false);
     setLogs([]);
+    overallFloorRef.current = 0;
+    queueTotalRef.current = files.length;
+    timingFileRef.current = "";
+    setStageDurationsSec({});
+    setStageFractions({});
     setFileProgress({
       current: 0,
       total: 0,
@@ -1134,6 +1201,7 @@ export default function App() {
             text: `Đã thêm ${n} video (xếp lúc khởi động) vào hàng đợi — sẽ chạy tự động`,
           });
           if (result.queue?.items?.length) {
+            queueTotalRef.current = result.queue.items.length;
             setQueue((prev) => {
               const meta = new Map(prev.map((p) => [p.stem, p]));
               return result.queue!.items.map((it) => {
@@ -1433,6 +1501,8 @@ export default function App() {
           overallProgress={overallProgress}
           elapsedSec={elapsedSec}
           completedElapsedSec={completedElapsedSec}
+          stageDurationsSec={stageDurationsSec}
+          stageFractions={stageFractions}
           dragOver={dragOver}
           onDragOver={(e) => {
             e.preventDefault();

@@ -213,6 +213,9 @@ async def synthesize_all(
     max_concurrency: int = 0,
 ) -> dict[int, Path]:
     """Generate MP3 per segment in parallel; skip existing valid files (resume)."""
+    if tracker:
+        tracker.begin_stage(Stage.TTS, "Đang chuẩn bị bộ tạo giọng đọc…")
+
     from .providers import get_tts_provider
 
     provider = get_tts_provider(

@@ -77,6 +77,8 @@ interface Props {
   };
   elapsedSec: number;
   completedElapsedSec: number[];
+  stageDurationsSec: Record<string, number>;
+  stageFractions: Record<string, number>;
   dragOver: boolean;
   onDragOver: (e: DragEvent) => void;
   onDragLeave: () => void;
@@ -124,6 +126,8 @@ export function DubPage(props: Props) {
     overallProgress,
     elapsedSec,
     completedElapsedSec,
+    stageDurationsSec,
+    stageFractions,
     dragOver,
     onDragOver,
     onDragLeave,
@@ -187,6 +191,8 @@ export function DubPage(props: Props) {
         fileTotal: totalFiles,
         queue,
         completedElapsedSec,
+        stageDurationsSec,
+        stageFractions,
       }),
     [
       busy,
@@ -200,6 +206,8 @@ export function DubPage(props: Props) {
       totalFiles,
       queue,
       completedElapsedSec,
+      stageDurationsSec,
+      stageFractions,
     ],
   );
 
@@ -509,6 +517,12 @@ export function DubPage(props: Props) {
           <div className="bar">
             <i style={{ width: `${overallPct}%` }} />
           </div>
+          {eta.measuredLabel ? (
+            <div className="progress-detail">
+              Đã đo 6 công đoạn của video này: <strong>{eta.measuredLabel}</strong>. Thanh
+              tổng được cộng theo tỷ trọng thời gian của từng công đoạn và không giảm.
+            </div>
+          ) : null}
           <label className="bar-label">
             {fileProgress.stageLabel || eta.stageName || "Công đoạn"}:{" "}
             <strong>{filePct}%</strong>
@@ -532,7 +546,10 @@ export function DubPage(props: Props) {
                 }
               >
                 <span className="stage-legend-name">{s.label}</span>
-                {s.remainLabel ? (
+                {s.actualLabel ? (
+                  <span className="stage-legend-eta"> · {s.actualLabel}</span>
+                ) : null}
+                {s.remainLabel && !(s.done && s.actualLabel) ? (
                   <span className="stage-legend-eta"> · {s.remainLabel}</span>
                 ) : null}
               </li>

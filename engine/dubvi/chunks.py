@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -144,7 +145,7 @@ def _process_chunk_early(
     model,
     cfg: JobConfig,
     cancel: CancellationToken | None,
-) -> tuple[ChunkPlan, list[Segment], list[Segment]]:
+) -> tuple[ChunkPlan, list[Segment], list[Segment], float, float]:
     chunk_work = _chunk_work_dir(work, plan)
     chunk_work.mkdir(parents=True, exist_ok=True)
     chunk_flac = _ensure_chunk_audio(full_flac, plan, chunk_work)
@@ -156,6 +157,7 @@ def _process_chunk_early(
     en_path = chunk_work / cache.TRANSCRIPT_EN
     vi_path = chunk_work / cache.TRANSCRIPT_VI
 
+    transcribe_started = time.perf_counter()
     segments_en = transcription.transcribe(
         chunk_flac,
         en_path,
@@ -167,7 +169,9 @@ def _process_chunk_early(
         time_offset=plan.start_sec,
         use_whisper_lock=True,
     )
+    transcribe_sec = max(0.0, time.perf_counter() - transcribe_started)
 
+    translate_started = time.perf_counter()
     segments_vi = translation.translate_segments(
         segments_en,
         vi_path,
@@ -180,7 +184,8 @@ def _process_chunk_early(
         prefer_gpu=cfg.prefer_gpu,
         concurrency=cfg.translate_concurrency,
     )
-    return plan, segments_en, segments_vi
+    translate_sec = max(0.0, time.perf_counter() - translate_started)
+    return plan, segments_en, segments_vi, transcribe_sec, translate_sec
 
 
 def process_early_stages_chunked(
@@ -219,11 +224,21 @@ def process_early_stages_chunked(
     groups_en: list[list[Segment]] = [[] for _ in plans]
     groups_vi: list[list[Segment]] = [[] for _ in plans]
     done = 0
+    transcribe_work_sec = 0.0
+    translate_work_sec = 0.0
 
-    def _on_chunk_done(plan: ChunkPlan, segs_en: list[Segment], segs_vi: list[Segment]) -> None:
-        nonlocal done
+    def _on_chunk_done(
+        plan: ChunkPlan,
+        segs_en: list[Segment],
+        segs_vi: list[Segment],
+        transcribe_sec: float,
+        translate_sec: float,
+    ) -> None:
+        nonlocal done, transcribe_work_sec, translate_work_sec
         groups_en[plan.index] = segs_en
         groups_vi[plan.index] = segs_vi
+        transcribe_work_sec += transcribe_sec
+        translate_work_sec += translate_sec
         done += 1
         msg = f"Xong phần {done}/{len(plans)} ({plan.start_sec / 60:.0f}–{plan.end_sec / 60:.0f} phút)"
         events.log(msg)
@@ -234,7 +249,7 @@ def process_early_stages_chunked(
         for plan in plans:
             if cancel:
                 cancel.check()
-            _, segs_en, segs_vi = _process_chunk_early(
+            _, segs_en, segs_vi, transcribe_sec, translate_sec = _process_chunk_early(
                 plan,
                 full_flac=full_flac,
                 work=work,
@@ -242,7 +257,7 @@ def process_early_stages_chunked(
                 cfg=cfg,
                 cancel=cancel,
             )
-            _on_chunk_done(plan, segs_en, segs_vi)
+            _on_chunk_done(plan, segs_en, segs_vi, transcribe_sec, translate_sec)
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
@@ -260,8 +275,8 @@ def process_early_stages_chunked(
             for fut in as_completed(futures):
                 if cancel:
                     cancel.check()
-                plan, segs_en, segs_vi = fut.result()
-                _on_chunk_done(plan, segs_en, segs_vi)
+                plan, segs_en, segs_vi, transcribe_sec, translate_sec = fut.result()
+                _on_chunk_done(plan, segs_en, segs_vi, transcribe_sec, translate_sec)
 
     segments_en = merge_segments(groups_en)
     segments_vi = merge_segments(groups_vi)
@@ -273,6 +288,12 @@ def process_early_stages_chunked(
     cache.save_segments(work / cache.TRANSCRIPT_VI, segments_vi)
 
     if tracker:
+        tracker.split_current_stage_timing(
+            {
+                Stage.TRANSCRIBING: transcribe_work_sec,
+                Stage.TRANSLATING: translate_work_sec,
+            }
+        )
         tracker.emit_chunk_early_progress(
             len(plans), len(plans), f"Đã ghép {len(segments_en)} đoạn từ {len(plans)} phần"
         )

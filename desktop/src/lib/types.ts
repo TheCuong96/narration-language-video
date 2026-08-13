@@ -64,6 +64,12 @@ export interface EngineEvent {
   total?: number;
   percent?: number;
   overall_percent?: number;
+  /** Measured wall-clock seconds spent in the active pipeline stage. */
+  stage_elapsed_sec?: number;
+  /** Measured wall-clock seconds per one of the six main pipeline stages. */
+  stage_durations_sec?: Record<string, number>;
+  /** Highest confirmed 0..1 completion fraction per main pipeline stage. */
+  stage_fracs?: Record<string, number>;
   stage_label?: string;
   file?: string;
   file_index?: number;
