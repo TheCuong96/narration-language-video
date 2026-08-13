@@ -246,20 +246,37 @@ def mux(
     tracker=None,
 ) -> None:
     mode = audio_mode.value if isinstance(audio_mode, AudioMode) else audio_mode
+    duration = probe_duration(video)
+
+    def _on_mux_progress(frac: float) -> None:
+        pct = max(0, min(100, int(round(frac * 100))))
+        msg = f"FFmpeg đang ghép… {pct}%"
+        if tracker:
+            tracker.emit(pct, 100, msg, force_frac=frac)
+        else:
+            events.progress(Stage.MUXING, pct, 100, msg)
+
     if tracker:
         tracker.begin_stage(Stage.MUXING, f"Đang ghép video ({mode}) → {output.name}")
-        tracker.emit(0, 1, "FFmpeg đang ghép…")
+        tracker.emit(0, 100, "Bắt đầu ghép video…")
     else:
         events.stage(Stage.MUXING, f"Đang ghép video ({mode}) → {output.name}")
-    mux_video(
+
+    plan = mux_video(
         video,
         narration,
         output,
         audio_mode=audio_mode,
         mix_original_db=mix_original_db,
         allow_reencode=allow_reencode,
+        duration_sec=duration,
+        on_progress=_on_mux_progress,
     )
+
+    if plan.reencode_video and duration >= 300 and tracker:
+        events.log("Đã re-encode video — lần sau dùng nguồn H.264/AV1 remux sẽ nhanh hơn")
+
     if tracker:
-        tracker.emit(1, 1, "Ghép xong")
+        tracker.emit(100, 100, "Ghép xong")
     else:
-        events.progress(Stage.MUXING, 1, 1, "Ghép xong")
+        events.progress(Stage.MUXING, 100, 100, "Ghép xong")

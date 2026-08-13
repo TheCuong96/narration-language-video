@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
+import threading
+from collections.abc import Callable
 from pathlib import Path
 
 from .models import ErrorCode
@@ -117,6 +120,122 @@ def run_ffmpeg(
             ErrorCode.INTERNAL,
             f"FFmpeg thất bại (exit {e.returncode}): {err or cmd[0]}",
         ) from e
+
+
+def run_ffmpeg_with_progress(
+    args: list[str],
+    *,
+    duration_sec: float = 0.0,
+    on_progress: Callable[[float], None] | None = None,
+) -> None:
+    """
+    Run FFmpeg and report 0..1 progress via -progress pipe:1 (and stderr time= fallback).
+
+    Used for long mux/re-encode steps so the UI does not sit at 0%.
+    """
+    cmd = list(args)
+    if len(cmd) >= 2:
+        out_idx = len(cmd) - 1
+        cmd = cmd[:out_idx] + ["-progress", "pipe:1", "-nostats"] + cmd[out_idx:]
+
+    log.debug("run (progress): %s", " ".join(cmd))
+    stderr_lines: list[str] = []
+    last_frac = -1.0
+    duration = max(float(duration_sec or 0), 0.0)
+    time_re = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
+
+    def _emit(frac: float) -> None:
+        nonlocal last_frac
+        f = max(0.0, min(1.0, frac))
+        if on_progress and (f >= last_frac + 0.02 or f >= 0.99):
+            last_frac = f
+            on_progress(f)
+
+    def _emit_from_seconds(sec: float) -> None:
+        if duration > 0:
+            _emit(sec / duration)
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            shell=False,
+        )
+    except FileNotFoundError as e:
+        raise EngineError(ErrorCode.FFMPEG_MISSING, f"Không chạy được: {cmd[0]}") from e
+
+    def _read_stdout() -> None:
+        if proc.stdout is None:
+            return
+        for line in proc.stdout:
+            line = line.strip()
+            if line.startswith("out_time_ms="):
+                try:
+                    ms = int(line.split("=", 1)[1])
+                    _emit_from_seconds(ms / 1_000_000.0)
+                except ValueError:
+                    pass
+
+    def _read_stderr() -> None:
+        if proc.stderr is None:
+            return
+        for line in proc.stderr:
+            stderr_lines.append(line)
+            m = time_re.search(line)
+            if m:
+                h, mnt, sec = int(m.group(1)), int(m.group(2)), float(m.group(3))
+                _emit_from_seconds(h * 3600 + mnt * 60 + sec)
+
+    t_out = threading.Thread(target=_read_stdout, daemon=True)
+    t_err = threading.Thread(target=_read_stderr, daemon=True)
+    t_out.start()
+    t_err.start()
+    code = proc.wait()
+    t_out.join(timeout=2)
+    t_err.join(timeout=2)
+
+    if code != 0:
+        err = "".join(stderr_lines).strip()
+        if len(err) > 800:
+            err = err[-800:]
+        raise EngineError(
+            ErrorCode.INTERNAL,
+            f"FFmpeg thất bại (exit {code}): {err or cmd[0]}",
+        )
+    if on_progress:
+        on_progress(1.0)
+
+
+def _video_codec_name(video: Path) -> str:
+    info = probe_streams(video)
+    for s in info.get("streams") or []:
+        if s.get("codec_type") == "video":
+            return str(s.get("codec_name") or "")
+    return ""
+
+
+def _video_stream_args(vcodec: str, *, reencode: bool) -> list[str]:
+    if reencode:
+        return [
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+    args = ["-c:v", "copy"]
+    if vcodec == "av1":
+        args += ["-tag:v", "av01"]
+    elif vcodec in ("hevc", "h265"):
+        args += ["-tag:v", "hvc1"]
+    return args
 
 
 def probe_duration(path: Path) -> float:
@@ -663,15 +782,21 @@ def plan_mux(
         copy_ok = False
         reason = f"Container đầu ra {out_suffix} kém tương thích — cần xử lý lại video"
 
-    # WebM/VP9/AV1 in MP4 often cannot copy
-    if out_suffix == ".mp4" and vcodec in {"vp8", "vp9", "av1", "theora", "mpeg4"}:
-        # mpeg4 (ASP) sometimes copies; vp*/av1 into mp4 usually no
-        if vcodec in {"vp8", "vp9", "av1", "theora"}:
-            copy_ok = False
-            reason = (
-                f"Codec video '{vcodec}' không copy được sang {out_suffix} — "
-                "bắt buộc re-encode video"
-            )
+    # VP8/VP9/Theora → MP4 usually needs re-encode. AV1/HEVC can remux with tags.
+    if out_suffix == ".mp4" and vcodec in {"vp8", "vp9", "theora"}:
+        copy_ok = False
+        reason = (
+            f"Codec video '{vcodec}' không copy được sang {out_suffix} — "
+            "bắt buộc re-encode video"
+        )
+    elif out_suffix == ".mp4" and vcodec in {"av1", "hevc", "h265"}:
+        copy_ok = True
+        reason = (
+            f"Sao chép {vcodec} sang MP4 (remux, tag container — không re-encode)"
+        )
+    elif out_suffix == ".mp4" and vcodec == "mpeg4":
+        copy_ok = False
+        reason = f"Codec video '{vcodec}' — re-encode sang H.264 cho tương thích MP4"
 
     if audio_mode == AudioMode.DUAL_TRACK and not astreams:
         # Still fine — only VI track
@@ -700,6 +825,8 @@ def mux_video(
     audio_mode: "AudioMode | str" = "vi_only",
     mix_original_db: float = -18.0,
     allow_reencode: bool = True,
+    duration_sec: float = 0.0,
+    on_progress: Callable[[float], None] | None = None,
 ) -> "MuxPlan":
     """
     Mux narration onto video without modifying the source file.
@@ -717,8 +844,11 @@ def mux_video(
 
     output.parent.mkdir(parents=True, exist_ok=True)
     plan = plan_mux(video, output, audio_mode, allow_reencode=allow_reencode)
+    vcodec = _video_codec_name(video)
+    duration = duration_sec if duration_sec > 0 else probe_duration(video)
 
     if plan.reencode_video:
+        mins = duration / 60.0 if duration > 0 else 0
         events.warning(
             "REENCODE_REQUIRED",
             plan.reason,
@@ -726,19 +856,22 @@ def mux_video(
             output=str(output),
             audio_mode=audio_mode.value,
         )
+        if mins >= 5:
+            events.log(
+                f"Re-encode video ~{mins:.0f} phút — có thể mất vài chục phút trên CPU; "
+                "thanh tiến độ sẽ cập nhật dần",
+                level="warn",
+            )
     else:
         events.log(plan.reason)
 
     tmp = output.with_name(f"{output.stem}.partial{output.suffix}")
-    cmd: list[str] = [ffmpeg_path(), "-y", "-i", str(video), "-i", str(narration)]
 
-    vcodec_args = (
-        ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
-        if plan.reencode_video
-        else ["-c:v", "copy"]
-    )
+    def _build_cmd(*, reencode: bool) -> list[str]:
+        cmd: list[str] = [ffmpeg_path(), "-y", "-i", str(video), "-i", str(narration)]
+        vcodec_args = _video_stream_args(vcodec, reencode=reencode)
+        movflags = ["-movflags", "+faststart"] if output.suffix.lower() == ".mp4" else []
 
-    try:
         if audio_mode == AudioMode.VI_ONLY:
             cmd += [
                 "-map",
@@ -746,6 +879,7 @@ def mux_video(
                 "-map",
                 "1:a:0",
                 *vcodec_args,
+                *movflags,
                 "-c:a",
                 "aac",
                 "-b:a",
@@ -754,7 +888,6 @@ def mux_video(
                 str(tmp),
             ]
         elif audio_mode == AudioMode.DUAL_TRACK:
-            # Keep original audio (if any) + Vietnamese
             cmd += [
                 "-map",
                 "0:v:0",
@@ -763,6 +896,7 @@ def mux_video(
                 "-map",
                 "1:a:0",
                 *vcodec_args,
+                *movflags,
                 "-c:a",
                 "aac",
                 "-b:a",
@@ -793,6 +927,7 @@ def mux_video(
                     "-map",
                     "1:a:0",
                     *vcodec_args,
+                    *movflags,
                     "-c:a",
                     "aac",
                     "-b:a",
@@ -815,6 +950,7 @@ def mux_video(
                     "-map",
                     "[aout]",
                     *vcodec_args,
+                    *movflags,
                     "-c:a",
                     "aac",
                     "-b:a",
@@ -824,8 +960,43 @@ def mux_video(
                 ]
         else:
             raise EngineError(ErrorCode.INVALID_ARGS, f"Audio mode không hỗ trợ: {audio_mode}")
+        return cmd
 
-        run_ffmpeg(cmd)
+    try:
+        reencode = plan.reencode_video
+        try:
+            run_ffmpeg_with_progress(
+                _build_cmd(reencode=reencode),
+                duration_sec=duration,
+                on_progress=on_progress,
+            )
+        except EngineError:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+            if not reencode and allow_reencode:
+                events.log(
+                    "Remux (copy) thất bại — thử re-encode H.264…",
+                    level="warn",
+                )
+                reencode = True
+                run_ffmpeg_with_progress(
+                    _build_cmd(reencode=True),
+                    duration_sec=duration,
+                    on_progress=on_progress,
+                )
+                plan = MuxPlan(
+                    video_codec_copy=False,
+                    reencode_video=True,
+                    reason="Remux thất bại — đã re-encode H.264",
+                    output_suffix=plan.output_suffix,
+                    audio_mode=plan.audio_mode,
+                )
+            else:
+                raise
+
         if output.exists():
             output.unlink()
         tmp.replace(output)
