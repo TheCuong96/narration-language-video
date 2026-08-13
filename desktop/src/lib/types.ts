@@ -94,6 +94,7 @@ export interface JobOptions {
   translateProvider: string;
   ttsProvider: string;
   xttsSpeakerWav?: string;
+  ttsConcurrency?: number;
 }
 
 export interface WhisperModelInfo {
@@ -134,6 +135,8 @@ export interface AppSettings {
   translate_provider: string;
   tts_provider: string;
   xtts_speaker_wav?: string;
+  /** 0 = auto (edge-tts uses 10 parallel requests). */
+  tts_concurrency?: number;
 }
 
 export interface ProbeInfo {

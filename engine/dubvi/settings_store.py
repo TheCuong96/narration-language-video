@@ -26,6 +26,9 @@ class AppSettings:
     tts_provider: str = "edge-tts"
     # Local XTTS speaker reference (WAV). Empty → model speaker_default.wav
     xtts_speaker_wav: str = ""
+    # 0 = auto (edge-tts → 10 parallel requests). Max capped in tts.py.
+    tts_concurrency: int = 0
+    translate_concurrency: int = 0
     # Never store API keys in plaintext logs; reserved for future
     # api_keys stored only if user opts in later versions
 

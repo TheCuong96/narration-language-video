@@ -85,6 +85,7 @@ const defaultSettings: AppSettings = {
   translate_provider: "deep-translator",
   tts_provider: "edge-tts",
   xtts_speaker_wav: "",
+  tts_concurrency: 0,
 };
 
 const LS_OUTPUT_DIR = "dubvi.default_output_dir";
@@ -1105,6 +1106,7 @@ export default function App() {
           translateProvider: settings.translate_provider || "deep-translator",
           ttsProvider: settings.tts_provider || "edge-tts",
           xttsSpeakerWav: settings.xtts_speaker_wav || "",
+          ttsConcurrency: settings.tts_concurrency ?? 0,
         },
         onEngineEvent,
       );

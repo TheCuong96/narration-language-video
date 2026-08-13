@@ -66,6 +66,18 @@ def _add_run_shared(p: argparse.ArgumentParser) -> None:
     p.add_argument("--no-reencode", action="store_true")
     p.add_argument("--no-cleanup", action="store_true")
     p.add_argument("--human", action="store_true")
+    p.add_argument(
+        "--tts-concurrency",
+        type=int,
+        default=None,
+        help="Số request TTS song song (edge-tts mặc định 10, 0=auto)",
+    )
+    p.add_argument(
+        "--translate-concurrency",
+        type=int,
+        default=None,
+        help="Số luồng dịch song song (0=auto)",
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -236,6 +248,12 @@ def _cfg_from_run(args: argparse.Namespace) -> JobConfig:
     translate_provider = args.translate_provider or settings.translate_provider
     tts_provider = args.tts_provider or settings.tts_provider
     xtts_speaker = args.xtts_speaker or settings.xtts_speaker_wav
+    tts_conc = args.tts_concurrency
+    if tts_conc is None:
+        tts_conc = getattr(settings, "tts_concurrency", 0) or 0
+    translate_conc = args.translate_concurrency
+    if translate_conc is None:
+        translate_conc = getattr(settings, "translate_concurrency", 0) or 0
     return JobConfig(
         input_dir=input_dir,
         input_files=files,
@@ -259,6 +277,8 @@ def _cfg_from_run(args: argparse.Namespace) -> JobConfig:
         translate_provider=translate_provider,
         tts_provider=tts_provider,
         xtts_speaker_wav=xtts_speaker or "",
+        tts_concurrency=int(tts_conc or 0),
+        translate_concurrency=int(translate_conc or 0),
     )
 
 

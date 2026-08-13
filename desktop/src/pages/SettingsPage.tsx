@@ -363,6 +363,29 @@ export function SettingsPage({
             <option value="xtts-v2">Offline trên máy (XTTS)</option>
           </select>
         </div>
+        {settings.tts_provider === "edge-tts" && (
+          <div className="row">
+            <label>TTS song song (edge-tts)</label>
+            <input
+              type="number"
+              min={1}
+              max={20}
+              step={1}
+              value={settings.tts_concurrency ?? 0}
+              onChange={(e) =>
+                onChange({
+                  ...settings,
+                  tts_concurrency: Math.max(0, parseInt(e.target.value, 10) || 0),
+                })
+              }
+            />
+            <p className="muted">
+              Số request TTS gọi cùng lúc. <strong>0 = tự động (10)</strong>. Mỗi đoạn
+              thoại = 1 request — tăng số này giúp video dài nhanh hơn; nếu bị lỗi mạng
+              hãy giảm xuống 5–8.
+            </p>
+          </div>
+        )}
         {offlineTts && (
           <>
             <div className="row">

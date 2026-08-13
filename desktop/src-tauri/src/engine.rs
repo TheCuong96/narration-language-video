@@ -31,6 +31,8 @@ pub struct JobOptions {
     pub tts_provider: String,
     #[serde(default)]
     pub xtts_speaker_wav: String,
+    #[serde(default)]
+    pub tts_concurrency: u32,
 }
 
 fn default_translate_provider() -> String {
@@ -465,6 +467,10 @@ pub async fn start_job(
         args.push("--xtts-speaker".into());
         args.push(options.xtts_speaker_wav);
     }
+    if options.tts_concurrency > 0 {
+        args.push("--tts-concurrency".into());
+        args.push(options.tts_concurrency.to_string());
+    }
 
     {
         let mut st = state.lock().map_err(|e| e.to_string())?;
@@ -517,6 +523,7 @@ fn default_settings_json() -> Value {
         "translate_provider": "deep-translator",
         "tts_provider": "edge-tts",
         "xtts_speaker_wav": "",
+        "tts_concurrency": 0,
     })
 }
 

@@ -259,6 +259,109 @@ def extract_video_segment(
     }
 
 
+def extract_audio_segment(
+    src: Path,
+    dst: Path,
+    start_sec: float,
+    end_sec: float,
+    *,
+    sample_rate: int = 16000,
+) -> None:
+    """Extract [start_sec, end_sec) from an audio file (FLAC/WAV) for chunk processing."""
+    if start_sec < 0:
+        raise EngineError(ErrorCode.INVALID_ARGS, "Thời điểm bắt đầu phải ≥ 0")
+    if end_sec <= start_sec:
+        raise EngineError(
+            ErrorCode.INVALID_ARGS,
+            "Thời điểm kết thúc phải lớn hơn thời điểm bắt đầu",
+        )
+    duration = end_sec - start_sec
+    if duration < 0.05:
+        raise EngineError(ErrorCode.INVALID_ARGS, "Đoạn audio quá ngắn (< 0.05s)")
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists() and dst.stat().st_size > 0:
+        return
+    run_ffmpeg(
+        [
+            ffmpeg_path(),
+            "-y",
+            "-ss",
+            f"{start_sec:.3f}",
+            "-i",
+            str(src),
+            "-t",
+            f"{duration:.3f}",
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            str(sample_rate),
+            "-c:a",
+            "flac",
+            str(dst),
+        ]
+    )
+
+
+def detect_silence_midpoints(
+    audio: Path,
+    *,
+    noise_db: float = -35.0,
+    min_silence_sec: float = 0.35,
+    min_silence_gap: float = 0.5,
+) -> list[float]:
+    """
+    Return approximate midpoints of silent regions (seconds).
+
+    Used to snap chunk boundaries away from speech. Returns [] on failure.
+    """
+    import re
+
+    af = f"silencedetect=noise={noise_db}dB:d={min_silence_sec}"
+    try:
+        proc = subprocess.run(
+            [
+                ffmpeg_path(),
+                "-hide_banner",
+                "-i",
+                str(audio),
+                "-af",
+                af,
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            shell=False,
+            check=False,
+        )
+    except Exception as e:
+        log.warning("silencedetect failed: %s", e)
+        return []
+
+    stderr = proc.stderr or ""
+    starts: list[float] = []
+    ends: list[float] = []
+    for line in stderr.splitlines():
+        m_start = re.search(r"silence_start:\s*([0-9.]+)", line)
+        if m_start:
+            starts.append(float(m_start.group(1)))
+        m_end = re.search(r"silence_end:\s*([0-9.]+)", line)
+        if m_end:
+            ends.append(float(m_end.group(1)))
+
+    midpoints: list[float] = []
+    for i, start in enumerate(starts):
+        end = ends[i] if i < len(ends) else start + min_silence_gap
+        if end - start >= min_silence_gap * 0.5:
+            midpoints.append((start + end) / 2.0)
+    return midpoints
+
+
 def extract_audio_flac(video: Path, flac_out: Path) -> None:
     """
     Extract mono 16 kHz FLAC for Whisper — smaller than PCM WAV,

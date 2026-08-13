@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,12 @@ log = get_logger("dubvi.transcription")
 
 _model = None
 _model_key: tuple | None = None
+_whisper_lock = threading.Lock()
+
+
+def whisper_lock() -> threading.Lock:
+    """Serialize Whisper calls when multiple chunk workers share one model."""
+    return _whisper_lock
 
 
 def load_whisper_model(
@@ -135,6 +142,9 @@ def transcribe(
     cancel: CancellationToken | None = None,
     tracker: ProgressTracker | None = None,
     duration_sec: float = 0.0,
+    time_offset: float = 0.0,
+    id_offset: int = 0,
+    use_whisper_lock: bool = False,
 ) -> list[Segment]:
     cached = cache.load_segments(transcript_path)
     if cached is not None:
@@ -161,8 +171,15 @@ def transcribe(
     if source_lang and source_lang != "auto":
         kwargs["language"] = source_lang
 
+    def _run_transcribe():
+        return model.transcribe(str(audio_path), **kwargs)
+
     try:
-        segments_iter, info = model.transcribe(str(audio_path), **kwargs)
+        if use_whisper_lock:
+            with _whisper_lock:
+                segments_iter, info = _run_transcribe()
+        else:
+            segments_iter, info = _run_transcribe()
     except Exception as e:
         raise EngineError(ErrorCode.TRANSCRIBE_FAILED, f"Nhận dạng thất bại: {e}") from e
 
@@ -184,9 +201,9 @@ def transcribe(
             continue
         segments.append(
             Segment(
-                id=len(segments),
-                start=round(seg.start, 3),
-                end=round(seg.end, 3),
+                id=id_offset + len(segments),
+                start=round(float(seg.start) + time_offset, 3),
+                end=round(float(seg.end) + time_offset, 3),
                 text_en=text,
             )
         )

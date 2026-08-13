@@ -20,6 +20,7 @@ NARRATION = "narration_slot.wav"
 SEGMENTS_DIR = "segments"
 # Strict slot-fit aligner (invalidates older fitted/ / fitted_soft/ caches)
 FITTED_DIR = "fitted_slot"
+CHUNKS_DIR = "chunks"
 
 
 def save_json(path: Path, data: Any) -> None:

@@ -6,7 +6,7 @@ import asyncio
 import time
 from pathlib import Path
 
-from . import audio, cache, events, queue, review, transcription, translation, tts
+from . import audio, cache, chunks, events, queue, review, transcription, translation, tts
 from .jobs import CancellationToken, create_job, update_job_state, video_work_dir
 from .models import (
     AudioMode,
@@ -116,52 +116,98 @@ def process_one(
         events.log("Dùng cache audio.flac")
     cancel.check()
 
-    # --- transcribe ---
-    if cfg.start_from in (StartFrom.TRANSCRIBE,):
-        tp = work / cache.TRANSCRIPT_EN
-        if tp.exists():
-            tp.unlink()
-    if cfg.start_from in (StartFrom.TRANSLATE, StartFrom.TTS, StartFrom.MUX) and (
-        work / cache.TRANSCRIPT_EN
-    ).exists():
-        segments = cache.load_segments(work / cache.TRANSCRIPT_EN) or []
-        tracker.begin_stage(Stage.TRANSCRIBING, "Dùng cache nhận dạng")
-        tracker.emit(1, 1, f"Cache: {len(segments)} đoạn")
-        events.log("Dùng cache transcript tiếng Anh")
+    use_chunks = chunks.should_use_chunks(duration, cfg)
+    segments: list = []
+    segments_vi: list = []
+
+    if use_chunks and cfg.start_from in (
+        StartFrom.AUTO,
+        StartFrom.EXTRACT,
+        StartFrom.TRANSCRIBE,
+        StartFrom.TRANSLATE,
+    ):
+        if cfg.start_from == StartFrom.TRANSCRIBE:
+            for name in (cache.TRANSCRIPT_EN, cache.TRANSCRIPT_VI):
+                p = work / name
+                if p.exists():
+                    p.unlink()
+        if cfg.start_from == StartFrom.TRANSLATE:
+            cache.clear_downstream(work, keep_en=True)
+
+        merged_en = work / cache.TRANSCRIPT_EN
+        merged_vi = work / cache.TRANSCRIPT_VI
+        if cfg.start_from in (StartFrom.TTS, StartFrom.MUX) and _has_vi(work):
+            segments_vi = cache.load_segments(merged_vi) or []
+            segments = cache.load_segments(merged_en) or []
+            tracker.begin_stage(Stage.TRANSLATING, "Dùng cache bản dịch (chunk)")
+            tracker.emit(1, 1, f"Cache: {len(segments_vi)} đoạn")
+            events.log("Dùng cache bản dịch chunk đã ghép")
+        elif _has_vi(work) and cfg.start_from == StartFrom.AUTO:
+            segments_vi = cache.load_segments(merged_vi) or []
+            segments = cache.load_segments(merged_en) or []
+            tracker.begin_stage(Stage.TRANSLATING, "Dùng cache bản dịch (chunk)")
+            tracker.emit(1, 1, f"Cache: {len(segments_vi)} đoạn")
+            events.log("Dùng cache bản dịch chunk đã ghép")
+        else:
+            segments, segments_vi = chunks.process_early_stages_chunked(
+                full_flac=flac,
+                work=work,
+                duration=duration,
+                model=model,
+                cfg=cfg,
+                cancel=cancel,
+                tracker=tracker,
+            )
     else:
-        segments = transcription.transcribe(
-            flac,
-            work / cache.TRANSCRIPT_EN,
-            model,
-            source_lang=cfg.source_lang,
-            cancel=cancel,
-            tracker=tracker,
-            duration_sec=duration,
-        )
+        # --- transcribe ---
+        if cfg.start_from in (StartFrom.TRANSCRIBE,):
+            tp = work / cache.TRANSCRIPT_EN
+            if tp.exists():
+                tp.unlink()
+        if cfg.start_from in (StartFrom.TRANSLATE, StartFrom.TTS, StartFrom.MUX) and (
+            work / cache.TRANSCRIPT_EN
+        ).exists():
+            segments = cache.load_segments(work / cache.TRANSCRIPT_EN) or []
+            tracker.begin_stage(Stage.TRANSCRIBING, "Dùng cache nhận dạng")
+            tracker.emit(1, 1, f"Cache: {len(segments)} đoạn")
+            events.log("Dùng cache transcript tiếng Anh")
+        else:
+            segments = transcription.transcribe(
+                flac,
+                work / cache.TRANSCRIPT_EN,
+                model,
+                source_lang=cfg.source_lang,
+                cancel=cancel,
+                tracker=tracker,
+                duration_sec=duration,
+            )
+        cancel.check()
+
+        # --- translate ---
+        if cfg.start_from == StartFrom.TRANSLATE:
+            cache.clear_downstream(work, keep_en=True)
+
+        if cfg.start_from in (StartFrom.TTS, StartFrom.MUX) and _has_vi(work):
+            segments_vi = cache.load_segments(work / cache.TRANSCRIPT_VI) or []
+            tracker.begin_stage(Stage.TRANSLATING, "Dùng cache bản dịch")
+            tracker.emit(1, 1, f"Cache: {len(segments_vi)} đoạn")
+            events.log("Dùng cache bản dịch tiếng Việt")
+        else:
+            segments_vi = translation.translate_segments(
+                segments,
+                work / cache.TRANSCRIPT_VI,
+                source_lang=cfg.source_lang,
+                target_lang=cfg.target_lang,
+                terms=cfg.terms,
+                cancel=cancel,
+                tracker=tracker,
+                provider_name=cfg.translate_provider,
+                prefer_gpu=cfg.prefer_gpu,
+                concurrency=cfg.translate_concurrency,
+            )
+
     events.log(f"Số đoạn: {len(segments)}")
     cancel.check()
-
-    # --- translate ---
-    if cfg.start_from == StartFrom.TRANSLATE:
-        cache.clear_downstream(work, keep_en=True)
-
-    if cfg.start_from in (StartFrom.TTS, StartFrom.MUX) and _has_vi(work):
-        segments_vi = cache.load_segments(work / cache.TRANSCRIPT_VI) or []
-        tracker.begin_stage(Stage.TRANSLATING, "Dùng cache bản dịch")
-        tracker.emit(1, 1, f"Cache: {len(segments_vi)} đoạn")
-        events.log("Dùng cache bản dịch tiếng Việt")
-    else:
-        segments_vi = translation.translate_segments(
-            segments,
-            work / cache.TRANSCRIPT_VI,
-            source_lang=cfg.source_lang,
-            target_lang=cfg.target_lang,
-            terms=cfg.terms,
-            cancel=cancel,
-            tracker=tracker,
-            provider_name=cfg.translate_provider,
-            prefer_gpu=cfg.prefer_gpu,
-        )
 
     script_path = work / cache.SCRIPT_VI
     lines = [f"[{s.start:.1f}-{s.end:.1f}] {s.text_vi}" for s in segments_vi]
@@ -255,6 +301,7 @@ def _finish_from_tts(
                 prefer_gpu=cfg.prefer_gpu,
                 speaker_wav=cfg.xtts_speaker_wav,
                 language=cfg.target_lang or "vi",
+                concurrency=cfg.tts_concurrency,
             )
         )
         cancel.check()

@@ -175,6 +175,13 @@ class JobConfig:
     translate_provider: str = "deep-translator"
     tts_provider: str = "edge-tts"
     xtts_speaker_wav: str = ""
+    # Long-video chunk pipeline (auto when duration >= chunk_min_duration_sec)
+    enable_chunking: bool = True
+    chunk_duration_sec: float = 300.0
+    chunk_min_duration_sec: float = 600.0
+    chunk_workers: int = 0  # 0 = auto
+    tts_concurrency: int = 0  # 0 = auto per provider
+    translate_concurrency: int = 0  # 0 = auto per provider
 
     @property
     def terms(self) -> list[str]:
