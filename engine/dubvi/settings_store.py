@@ -7,7 +7,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .models import DEFAULT_MIX_ORIGINAL_DB, DEFAULT_MODEL, DEFAULT_VOICE, AudioMode
+from .models import (
+    DEFAULT_MIX_ORIGINAL_DB,
+    DEFAULT_MODEL,
+    DEFAULT_SOURCE_LANG,
+    DEFAULT_VOICE,
+    AudioMode,
+)
 from .system_info import appdata_root
 
 
@@ -22,6 +28,9 @@ class AppSettings:
     voice: str = DEFAULT_VOICE
     audio_mode: str = AudioMode.VI_ONLY.value
     review_by_default: bool = False
+    force_rerun: bool = False
+    source_lang: str = DEFAULT_SOURCE_LANG
+    use_existing_subtitles: bool = False
     translate_provider: str = "deep-translator"
     tts_provider: str = "edge-tts"
     # Local XTTS speaker reference (WAV). Empty → model speaker_default.wav

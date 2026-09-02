@@ -16,11 +16,13 @@ TRANSCRIPT_EN = "transcript_en.json"
 TRANSCRIPT_VI = "transcript_vi.json"
 SCRIPT_VI = "script_vi.txt"
 AUDIO_FLAC = "audio.flac"
-NARRATION = "narration_slot.wav"
+NARRATION = "narration_1x.wav"
 SEGMENTS_DIR = "segments"
-# Strict slot-fit aligner (invalidates older fitted/ / fitted_soft/ caches)
-FITTED_DIR = "fitted_slot"
+# 1× default aligner (invalidates fitted_slot/ which ended every line at cue `end`)
+FITTED_DIR = "fitted_1x"
 CHUNKS_DIR = "chunks"
+_LEGACY_NARRATION = ("narration_slot.wav", "narration.wav")
+_LEGACY_FITTED = ("fitted_slot", "fitted_soft", "fitted")
 
 
 def save_json(path: Path, data: Any) -> None:
@@ -49,7 +51,7 @@ def load_segments(path: Path) -> list[Segment] | None:
 
 def clear_downstream(work: Path, *, keep_en: bool = True) -> None:
     """Clear caches that depend on later stages (for --force)."""
-    for name in (TRANSCRIPT_VI, SCRIPT_VI, NARRATION, "concat.txt"):
+    for name in (TRANSCRIPT_VI, SCRIPT_VI, NARRATION, "concat.txt", *_LEGACY_NARRATION):
         p = work / name
         if p.exists():
             p.unlink()
@@ -60,7 +62,7 @@ def clear_downstream(work: Path, *, keep_en: bool = True) -> None:
         audio = work / AUDIO_FLAC
         if audio.exists():
             audio.unlink()
-    for dname in (FITTED_DIR, SEGMENTS_DIR):
+    for dname in (FITTED_DIR, SEGMENTS_DIR, *_LEGACY_FITTED):
         d = work / dname
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)
@@ -71,14 +73,14 @@ def cleanup_temps_after_success(work: Path, *, keep_transcripts: bool = True) ->
     After successful mux: remove bulky temps, keep transcripts for re-run insight.
     On failure the caller must NOT call this.
     """
-    for name in (AUDIO_FLAC, NARRATION, "concat.txt"):
+    for name in (AUDIO_FLAC, NARRATION, "concat.txt", *_LEGACY_NARRATION):
         p = work / name
         if p.exists():
             try:
                 p.unlink()
             except OSError as e:
                 log.warning("cleanup %s: %s", p, e)
-    for dname in (FITTED_DIR, SEGMENTS_DIR):
+    for dname in (FITTED_DIR, SEGMENTS_DIR, *_LEGACY_FITTED):
         d = work / dname
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)

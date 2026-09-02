@@ -29,6 +29,22 @@ const VOICES = [
   { id: "vi-VN-NamMinhNeural", label: "Nam — Nam Minh" },
 ];
 const MODELS = ["tiny", "base", "small", "medium", "large-v3"];
+const SOURCE_LANGUAGES = [
+  { id: "auto", label: "Tự động nhận diện" },
+  { id: "en", label: "Tiếng Anh" },
+  { id: "es", label: "Tiếng Tây Ban Nha" },
+  { id: "zh", label: "Tiếng Trung" },
+  { id: "ja", label: "Tiếng Nhật" },
+  { id: "ko", label: "Tiếng Hàn" },
+  { id: "fr", label: "Tiếng Pháp" },
+  { id: "de", label: "Tiếng Đức" },
+  { id: "pt", label: "Tiếng Bồ Đào Nha" },
+  { id: "ru", label: "Tiếng Nga" },
+  { id: "th", label: "Tiếng Thái" },
+  { id: "id", label: "Tiếng Indonesia" },
+  { id: "hi", label: "Tiếng Hindi" },
+  { id: "ar", label: "Tiếng Ả Rập" },
+];
 
 function statusLabel(s: string): string {
   const map: Record<string, string> = {
@@ -49,11 +65,14 @@ interface Props {
   outputDir: string;
   voice: string;
   model: string;
+  sourceLang: string;
   audioMode: AudioMode;
   mixDb: number;
   review: boolean;
   force: boolean;
   preferGpu: boolean;
+  useExistingSubtitles: boolean;
+  subtitleCount: number;
   ttsProvider: string;
   xttsSpeakers: XttsSpeakerOption[];
   xttsSpeakerWav: string;
@@ -84,15 +103,18 @@ interface Props {
   onDragLeave: () => void;
   onDrop: (e: DragEvent) => void;
   onPickFiles: () => void;
+  onPickFolder: () => void;
   onPickOut: () => void;
   onChangeOutput: (v: string) => void;
   onVoice: (v: string) => void;
   onXttsSpeaker: (path: string) => void;
   onModel: (v: string) => void;
+  onSourceLang: (v: string) => void;
   onAudioMode: (v: AudioMode) => void;
   onMixDb: (v: number) => void;
   onReview: (v: boolean) => void;
   onForce: (v: boolean) => void;
+  onUseExistingSubtitles: (v: boolean) => void;
   onGpu: (v: boolean) => void;
   onStart: () => void;
   onStop: () => void;
@@ -110,11 +132,14 @@ export function DubPage(props: Props) {
     outputDir,
     voice,
     model,
+    sourceLang,
     audioMode,
     mixDb,
     review,
     force,
     preferGpu,
+    useExistingSubtitles,
+    subtitleCount,
     ttsProvider,
     xttsSpeakers,
     xttsSpeakerWav,
@@ -133,15 +158,18 @@ export function DubPage(props: Props) {
     onDragLeave,
     onDrop,
     onPickFiles,
+    onPickFolder,
     onPickOut,
     onChangeOutput,
     onVoice,
     onXttsSpeaker,
     onModel,
+    onSourceLang,
     onAudioMode,
     onMixDb,
     onReview,
     onForce,
+    onUseExistingSubtitles,
     onGpu,
     onStart,
     onStop,
@@ -229,13 +257,27 @@ export function DubPage(props: Props) {
         <span>
           {busy
             ? "Video mới sẽ tự chạy sau khi video hiện tại xong — không cần bấm Bắt đầu lại"
-            : "MP4 · MKV · MOV · AVI · WebM — hoặc bấm chọn một / nhiều file"}
+            : "MP4 · MKV · MOV · AVI · WebM — có thể kèm file *_vi.srt trong cùng thư mục"}
         </span>
         {files.length === 1 ? (
           <PathTail path={files[0]} className="drop-path" />
         ) : (
           <div className="drop-path">{fileLabel}</div>
         )}
+        {canAddVideos ? (
+          <div
+            className="drop-actions"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => e.stopPropagation()}
+          >
+            <button type="button" onClick={onPickFiles}>
+              Chọn file
+            </button>
+            <button type="button" className="primary" onClick={onPickFolder}>
+              Chọn thư mục
+            </button>
+          </div>
+        ) : null}
         {busy && canAddVideos ? (
           <div className="drop-locked drop-add-hint">
             Đang lồng tiếng — vẫn có thể thêm video; chúng sẽ chờ trong hàng đợi
@@ -254,9 +296,42 @@ export function DubPage(props: Props) {
             </p>
           ) : (
             <p className="muted url-lead">
-              Nhận dạng lời nói → dịch Việt → tạo giọng đọc → ghép lại video.
+              Hai cách lấy lời Việt, dùng song song: tự dịch từ giọng gốc, hoặc đọc
+              file phụ đề *_vi.srt.
             </p>
           )}
+          <div
+            className="source-modes"
+            role="radiogroup"
+            aria-label="Cách lấy lời Việt"
+          >
+            <label
+              className={`source-mode ${!useExistingSubtitles ? "is-on" : ""}`}
+            >
+              <input
+                type="radio"
+                name="vi-source"
+                checked={!useExistingSubtitles}
+                onChange={() => onUseExistingSubtitles(false)}
+                disabled={settingsLocked}
+              />
+              <strong>Tự dịch</strong>
+              <span>Nhận dạng lời nói → dịch Việt → tạo giọng đọc</span>
+            </label>
+            <label
+              className={`source-mode ${useExistingSubtitles ? "is-on" : ""}`}
+            >
+              <input
+                type="radio"
+                name="vi-source"
+                checked={useExistingSubtitles}
+                onChange={() => onUseExistingSubtitles(true)}
+                disabled={settingsLocked}
+              />
+              <strong>Dùng phụ đề SRT</strong>
+              <span>Có *_vi.srt thì đọc file; video không có SRT thì tự dịch</span>
+            </label>
+          </div>
           <div className="row">
             <label>Thư mục ra</label>
             <PathInput
@@ -321,6 +396,20 @@ export function DubPage(props: Props) {
               chọn Microsoft Edge trong Settings.
             </p>
           ) : null}
+          <div className="row">
+            <label>Ngôn ngữ gốc</label>
+            <select
+              value={sourceLang}
+              onChange={(e) => onSourceLang(e.target.value)}
+              disabled={settingsLocked}
+            >
+              {SOURCE_LANGUAGES.map((lang) => (
+                <option key={lang.id} value={lang.id}>
+                  {lang.label}
+                </option>
+              ))}
+            </select>
+          </div>
           <div className="row">
             <label>Nhận dạng lời nói</label>
             <select
@@ -390,6 +479,18 @@ export function DubPage(props: Props) {
               <CheckHelp tip="Chọn nếu máy có card Nvidia và muốn nhận dạng giọng nhanh hơn. Không có Nvidia hoặc lỗi thì app tự dùng CPU." />
             </label>
           </div>
+          {subtitleCount ? (
+            <p className="muted" style={{ marginTop: "-0.35rem" }}>
+              {useExistingSubtitles
+                ? `Đã thấy ${subtitleCount} file *_vi.srt — video khớp sẽ đọc phụ đề, video còn lại vẫn tự dịch.`
+                : `Đã thấy ${subtitleCount} file *_vi.srt. Đang để Tự dịch (bỏ qua SRT). Chọn «Dùng phụ đề SRT» nếu muốn đọc file.`}
+            </p>
+          ) : useExistingSubtitles ? (
+            <p className="muted" style={{ marginTop: "-0.35rem" }}>
+              App tìm video.mp4 ↔ video_vi.srt trong cùng folder. Video không có
+              SRT vẫn tự dịch.
+            </p>
+          ) : null}
           <div className="actions">
             <button
               type="button"

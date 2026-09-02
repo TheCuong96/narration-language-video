@@ -146,6 +146,16 @@ body {
   border: 1px solid rgba(12, 107, 88, 0.2);
   padding: 8px 10px;
 }
+.drop-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 12px;
+}
+.drop-actions button {
+  min-width: 8.5rem;
+}
 
 .url-panel {
   margin-top: 14px;
@@ -414,6 +424,55 @@ button.linkish:hover {
 }
 .row.checks { flex-wrap: wrap; gap: 14px; }
 .row.checks label { min-width: 0; color: var(--ink); display: inline-flex; align-items: center; gap: 4px; }
+
+.source-modes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+.source-mode {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 10px 12px 10px 34px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  cursor: pointer;
+  min-width: 0;
+}
+.source-mode input {
+  position: absolute;
+  left: 12px;
+  top: 13px;
+  margin: 0;
+}
+.source-mode strong {
+  font-size: 0.95rem;
+  color: var(--ink);
+}
+.source-mode span {
+  font-size: 0.82rem;
+  color: var(--muted);
+  line-height: 1.35;
+}
+.source-mode.is-on {
+  border-color: var(--accent);
+  background: rgba(12, 107, 88, 0.07);
+  box-shadow: 0 0 0 1px rgba(12, 107, 88, 0.18);
+}
+.panel.settings-locked .source-mode {
+  opacity: 0.78;
+  cursor: not-allowed;
+}
+@media (max-width: 720px) {
+  .source-modes {
+    grid-template-columns: 1fr;
+  }
+}
 
 .check-help {
   position: relative;

@@ -42,7 +42,7 @@ def test_strict_fit_speeds_up_long_audio(tmp_path: Path):
     assert 0.45 <= actual <= 0.55
 
 
-def test_short_audio_stays_1x_and_pads(tmp_path: Path):
+def test_short_audio_stays_1x_and_pads(tmp_path: Path, wav_active_duration):
     from dubvi.ffmpeg import probe_duration, stretch_to_duration, run_ffmpeg, ffmpeg_path
 
     src = tmp_path / "src.wav"
@@ -68,6 +68,9 @@ def test_short_audio_stays_1x_and_pads(tmp_path: Path):
     dur = probe_duration(dst)
     assert 0.95 <= dur <= 1.05
     assert 0.95 <= actual <= 1.05
+    # Must pad, not time-stretch: tone stays ~0.4s at the start.
+    active = wav_active_duration(dst)
+    assert 0.32 <= active <= 0.52
 
 
 def test_legacy_spill_still_available(tmp_path: Path):

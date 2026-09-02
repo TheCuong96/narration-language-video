@@ -541,6 +541,43 @@ def atempo_filter_chain(tempo: float) -> list[str]:
     return filters
 
 
+def _pad_trim_wav(
+    src: Path,
+    dst: Path,
+    target_sec: float,
+    *,
+    sample_rate: int = 24000,
+) -> float:
+    """Copy speech at 1× and pad/trim to target_sec. Never changes tempo."""
+    target = max(float(target_sec), 0.05)
+    out = dst
+    tmp: Path | None = None
+    if src.resolve() == dst.resolve():
+        tmp = dst.with_name(dst.stem + ".__pad__.wav")
+        out = tmp
+    run_ffmpeg(
+        [
+            ffmpeg_path(),
+            "-y",
+            "-i",
+            str(src),
+            "-af",
+            f"apad=whole_dur={target:.3f},atrim=0:{target:.3f}",
+            "-ar",
+            str(sample_rate),
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            str(out),
+        ]
+    )
+    if tmp is not None:
+        tmp.replace(dst)
+    actual = probe_duration(dst)
+    return actual if actual > 0 else target
+
+
 def stretch_to_duration(
     src: Path,
     dst: Path,
@@ -554,44 +591,29 @@ def stretch_to_duration(
     """
     Fit audio into target_sec using atempo + pad.
 
-    - Longer than target → speed up (up to max_tempo; set high for strict slots).
-    - Shorter than target → keep ≥ min_tempo (default 1×) and pad silence.
+    - Longer than target → speed up (up to max_tempo).
+    - Shorter than target → keep 1× (never below min_tempo) and pad silence.
     - allow_spill=True keeps leftover length after max speedup (legacy); strict
       align uses allow_spill=False so output duration == target_sec.
     """
     dst.parent.mkdir(parents=True, exist_ok=True)
     target = max(float(target_sec), 0.05)
+    floor = max(float(min_tempo), 1.0)
     dur = probe_duration(src)
     if dur <= 0:
         make_silence(dst, target)
         return target
 
-    # Short speech: never slow below min_tempo (1×) — pad to fill the slot.
-    if dur <= target + 0.02:
-        run_ffmpeg(
-            [
-                ffmpeg_path(),
-                "-y",
-                "-i",
-                str(src),
-                "-af",
-                f"apad=whole_dur={target:.3f},atrim=0:{target:.3f}",
-                "-ar",
-                "24000",
-                "-ac",
-                "1",
-                "-c:a",
-                "pcm_s16le",
-                str(dst),
-            ]
-        )
-        actual = probe_duration(dst)
-        return actual if actual > 0 else target
+    # Never slow speech to fill time: 1× + silence when it already fits.
+    if dur <= target + 0.05:
+        return _pad_trim_wav(src, dst, target)
 
     slack = max(0.0, min(fit_slack, 0.5))
     usable = max(target * (1.0 - slack), 0.05)
     tempo = dur / usable if usable > 0 else 1.0
-    tempo = max(min_tempo, min(tempo, max_tempo))
+    tempo = max(floor, min(tempo, max_tempo))
+    if tempo <= 1.01:
+        return _pad_trim_wav(src, dst, target)
 
     filters = atempo_filter_chain(tempo)
     sped_dur = dur / tempo
@@ -634,11 +656,10 @@ def fit_audio_to_duration(
     sample_rate: int = 24000,
 ) -> float:
     """
-    Time-stretch the whole clip so duration matches target_sec.
+    Match duration to target_sec without ever slowing speech.
 
-    Unlike stretch_to_duration, this never hard-trims speech content: tempo is
-    raised/lowered as much as needed (via stacked atempo) so the full audio fits.
-    A final apad+atrim only corrects float error to an exact length.
+    Longer than target → speed up (stacked atempo) so full content still fits.
+    Shorter than target → keep 1× and pad silence.
     """
     dst.parent.mkdir(parents=True, exist_ok=True)
     target = max(float(target_sec), 0.05)
@@ -647,38 +668,16 @@ def fit_audio_to_duration(
         make_silence(dst, target, sample_rate=sample_rate)
         return target
 
-    # Already within tolerance — pad if slightly short, else copy as-is.
-    if abs(dur - target) <= 0.05:
-        if dur < target - 0.01:
-            run_ffmpeg(
-                [
-                    ffmpeg_path(),
-                    "-y",
-                    "-i",
-                    str(src),
-                    "-af",
-                    f"apad=whole_dur={target:.3f},atrim=0:{target:.3f}",
-                    "-ar",
-                    str(sample_rate),
-                    "-ac",
-                    "1",
-                    "-c:a",
-                    "pcm_s16le",
-                    str(dst),
-                ]
-            )
-            actual = probe_duration(dst)
-            return actual if actual > 0 else target
-        if src.resolve() != dst.resolve():
+    if dur <= target + 0.05:
+        if dur >= target - 0.01 and src.resolve() != dst.resolve():
             shutil.copy2(src, dst)
-        return dur
+            return dur
+        return _pad_trim_wav(src, dst, target, sample_rate=sample_rate)
 
-    tempo = dur / target
+    tempo = max(1.0, dur / target)
     filters = atempo_filter_chain(tempo)
-    # Nail exact length after speed change (tiny atrrim only for float drift).
     af = ",".join(filters) + f",apad=whole_dur={target:.3f},atrim=0:{target:.3f}"
 
-    # Write via temp when in-place so FFmpeg never reads/writes the same file.
     out = dst
     tmp: Path | None = None
     if src.resolve() == dst.resolve():

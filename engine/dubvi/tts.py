@@ -164,7 +164,7 @@ async def tts_segment_with_backoff(
     base_delay: float = 1.5,
 ) -> None:
     out_mp3.parent.mkdir(parents=True, exist_ok=True)
-    rates = ["+0%", "-5%", "+5%", "+0%", "-10%"]
+    rates = ["+0%", "+5%", "+10%", "+0%", "+15%"]
     last_err: Exception | None = None
     attempts = max_attempts if getattr(provider, "requires_internet", True) else min(2, max_attempts)
 

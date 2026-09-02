@@ -7,6 +7,7 @@ import type {
   ProbeInfo,
   QueueState,
   SegmentRow,
+  MediaScan,
   WhisperModelInfo,
   XttsSpeakerOption,
 } from "./types";
@@ -39,6 +40,14 @@ async function ensureEngineListen(onEvent: EventHandler): Promise<void> {
 
 export async function pickVideos(): Promise<string[]> {
   return invoke<string[]>("pick_videos");
+}
+
+export async function pickInputFolder(): Promise<string | null> {
+  return invoke<string | null>("pick_input_folder");
+}
+
+export async function expandAndMatchMedia(paths: string[]): Promise<MediaScan> {
+  return invoke<MediaScan>("expand_and_match_media", { paths });
 }
 
 export async function pickOutputDir(): Promise<string | null> {
@@ -298,6 +307,33 @@ export async function doctor(): Promise<DoctorReport> {
 
 export async function privacyNotice(): Promise<Record<string, unknown>> {
   return invoke("privacy_notice");
+}
+
+export function isVideoPath(path: string): boolean {
+  return /\.(mp4|mkv|mov|avi|webm)$/i.test(path);
+}
+
+export function isSubtitlePath(path: string): boolean {
+  return /\.(srt|vtt)$/i.test(path);
+}
+
+/** Folder drop: last segment has no typical file extension. */
+export function isLikelyFolderPath(path: string): boolean {
+  const name = path.split(/[\\/]/).pop() || "";
+  return !!name && !/\.[a-z0-9]{1,5}$/i.test(name);
+}
+
+export function splitMediaPaths(paths: string[]): {
+  videos: string[];
+  subtitles: string[];
+} {
+  const videos: string[] = [];
+  const subtitles: string[] = [];
+  for (const p of paths) {
+    if (isSubtitlePath(p)) subtitles.push(p);
+    else if (isVideoPath(p) || isLikelyFolderPath(p)) videos.push(p);
+  }
+  return { videos, subtitles };
 }
 
 export function filterVideoFiles(files: FileList | File[]): File[] {

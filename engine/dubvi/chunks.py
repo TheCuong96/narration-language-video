@@ -39,6 +39,7 @@ def default_chunk_workers() -> int:
 
 
 def should_use_chunks(duration_sec: float, cfg: JobConfig) -> bool:
+    # SRT path returns before this is called. Videos without a sidecar still chunk.
     if not cfg.enable_chunking:
         return False
     if duration_sec < cfg.chunk_min_duration_sec:

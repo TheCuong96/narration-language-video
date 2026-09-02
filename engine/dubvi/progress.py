@@ -140,6 +140,17 @@ class ProgressTracker:
             share = combined_wall * seconds / task_total
             self._stage_durations_sec[name] = self._stage_durations_sec.get(name, 0.0) + share
 
+    def skip_asr_pipeline(self, message: str = "Dùng phụ đề có sẵn") -> None:
+        """Mark extract/transcribe/translate complete when using existing SRT/VTT."""
+        steps = (
+            (Stage.EXTRACTING, "Bỏ qua tách audio (đã có phụ đề)"),
+            (Stage.TRANSCRIBING, "Bỏ qua nhận dạng lời nói"),
+            (Stage.TRANSLATING, message),
+        )
+        for stage, msg in steps:
+            self.begin_stage(stage, msg)
+            self.emit(1, 1, msg)
+
     def begin_stage(self, stage: Stage | str, message: str = "") -> None:
         name = stage.value if isinstance(stage, Stage) else stage
         now = time.perf_counter()

@@ -20,6 +20,8 @@ pub struct JobOptions {
     pub output_dir: String,
     pub voice: String,
     pub model: String,
+    #[serde(default = "default_source_lang")]
+    pub source_lang: String,
     pub audio_mode: String,
     pub mix_db: f64,
     pub review: bool,
@@ -35,6 +37,10 @@ pub struct JobOptions {
     pub tts_concurrency: u32,
     #[serde(default)]
     pub tts_max_concurrency: u32,
+    #[serde(default)]
+    pub use_existing_subtitles: bool,
+    #[serde(default)]
+    pub subtitle_files: Vec<String>,
 }
 
 fn default_translate_provider() -> String {
@@ -43,6 +49,10 @@ fn default_translate_provider() -> String {
 
 fn default_tts_provider() -> String {
     "edge-tts".into()
+}
+
+fn default_source_lang() -> String {
+    "en".into()
 }
 
 fn repo_engine_dir() -> PathBuf {
@@ -437,6 +447,8 @@ pub async fn start_job(
         options.voice,
         "--model".into(),
         options.model,
+        "--source-lang".into(),
+        options.source_lang,
         "--audio-mode".into(),
         options.audio_mode,
         "--mix-db".into(),
@@ -476,6 +488,13 @@ pub async fn start_job(
     if options.tts_max_concurrency > 0 {
         args.push("--tts-max-concurrency".into());
         args.push(options.tts_max_concurrency.to_string());
+    }
+    if options.use_existing_subtitles {
+        args.push("--use-subtitles".into());
+    }
+    if !options.subtitle_files.is_empty() {
+        args.push("--subtitles".into());
+        args.extend(options.subtitle_files);
     }
 
     {
@@ -526,6 +545,9 @@ fn default_settings_json() -> Value {
         "voice": "vi-VN-HoaiMyNeural",
         "audio_mode": "vi_only",
         "review_by_default": false,
+        "force_rerun": false,
+        "source_lang": "en",
+        "use_existing_subtitles": false,
         "translate_provider": "deep-translator",
         "tts_provider": "edge-tts",
         "xtts_speaker_wav": "",

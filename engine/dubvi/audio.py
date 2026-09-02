@@ -20,7 +20,8 @@ from .system_info import get_logger
 
 log = get_logger("dubvi.audio")
 
-# Never slow speech down; only speed up when VI TTS is longer than the EN slot.
+# Never slow speech down. Default is 1×; speed up only when the next line (or
+# the end of the video) would be overlapped.
 MIN_TEMPO = 1.0
 # Practical ceiling for stacked atempo (≈ 8×); enough for long VI lines in short slots.
 MAX_TEMPO = 8.0
@@ -42,7 +43,7 @@ def extract_for_whisper(video: Path, work: Path, tracker=None) -> Path:
 
 
 def _segment_windows(segments: list[Segment]) -> list[tuple[int, float, float]]:
-    """Return (id, start, end) with sane minimum lengths."""
+    """Return (id, start, end) with sane minimum lengths, in time order."""
     out: list[tuple[int, float, float]] = []
     for s in segments:
         start = float(s.start)
@@ -50,6 +51,22 @@ def _segment_windows(segments: list[Segment]) -> list[tuple[int, float, float]]:
         if end <= start:
             end = start + 0.3
         out.append((s.id, start, end))
+    out.sort(key=lambda w: (w[1], w[2], w[0]))
+    return out
+
+
+def _play_deadlines(segments: list[Segment], video_duration: float) -> dict[int, float]:
+    """Latest time each line may occupy at 1×: next line's start, or video end."""
+    wins = _segment_windows(segments)
+    out: dict[int, float] = {}
+    for i, (sid, start, end) in enumerate(wins):
+        if i + 1 < len(wins):
+            deadline = wins[i + 1][1]
+        elif video_duration > start + 0.05:
+            deadline = video_duration
+        else:
+            deadline = end
+        out[sid] = max(deadline, start + 0.2)
     return out
 
 
@@ -62,15 +79,17 @@ def allocate_speech_targets(
     min_gap: float = 0.0,
 ) -> dict[int, float]:
     """
-    Target play duration per segment = original EN time slot only.
+    Max play duration per segment at 1× before the next line (or video end).
 
-    Gap-borrow / spill were removed: each line must start and end with the
-    original timestamps. natural_durs / max_tempo / min_gap are accepted for
-    call-site compatibility but do not expand slots.
+    Lines still start at the original timestamp. Speech may run past the
+    subtitle/Whisper ``end`` into the following gap; it is only sped up when
+    it would overlap the next line. natural_durs / max_tempo / min_gap are
+    accepted for call-site compatibility.
     """
-    del natural_durs, video_duration, max_tempo, min_gap
+    del natural_durs, max_tempo, min_gap
+    deadlines = _play_deadlines(segments, video_duration)
     wins = _segment_windows(segments)
-    return {sid: max(end - start, 0.2) for sid, start, end in wins}
+    return {sid: max(deadlines[sid] - start, 0.2) for sid, start, _end in wins}
 
 
 def build_narration(
@@ -83,11 +102,11 @@ def build_narration(
     tracker=None,
 ) -> Path:
     """
-    Build full narration WAV locked to original segment timestamps.
+    Build full narration WAV. Each line starts at the original timestamp.
 
-    - TTS longer than (end − start) → speed up as needed to fit the slot.
-    - TTS shorter → keep 1× and pad silence to ``end``.
-    - No gap-borrow and no spill into later segments (avoids drift).
+    - Default tempo is 1× (never slowed to fill a long cue).
+    - TTS may occupy the gap until the next line.
+    - Speed up only when TTS would overlap the next line (or the video end).
     """
     narration = work / cache.NARRATION
     if narration.exists() and narration.stat().st_size > 0:
@@ -133,33 +152,34 @@ def build_narration(
 
     targets = allocate_speech_targets(segments, natural_durs, video_duration)
     sped = 0
+    kept = 0
     for s in segments:
         nat = natural_durs.get(s.id)
         tgt = targets.get(s.id)
-        if nat and tgt and nat > tgt * 1.02:
-            sped += 1
+        if nat and tgt:
+            if nat > tgt * 1.02:
+                sped += 1
+            else:
+                kept += 1
     events.log(
-        f"Căn giờ theo mốc gốc: {len(natural_durs)} đoạn TTS, "
-        f"{sped} đoạn tăng tốc để khớp [start→end], "
-        f"đoạn ngắn hơn giữ 1× + đệm im lặng"
+        f"Căn giờ 1×: {len(natural_durs)} đoạn TTS, "
+        f"{kept} đoạn giữ tốc độ bình thường, "
+        f"{sped} đoạn tăng tốc vì không đủ thời gian đến câu sau"
     )
 
     pieces: list[Path] = []
     cursor = 0.0
-    total = len(segments)
+    ordered = sorted(segments, key=lambda s: (float(s.start), float(s.end), s.id))
+    total = len(ordered)
+    deadlines = _play_deadlines(ordered, video_duration)
 
-    for idx, s in enumerate(segments):
+    for idx, s in enumerate(ordered):
         if cancel:
             cancel.check()
 
         start = float(s.start)
-        end = float(s.end)
-        if end <= start:
-            end = start + 0.3
-
-        # Overlapping Whisper windows: keep timeline monotonic, still end at end.
         play_start = max(start, cursor)
-        play_end = max(end, play_start + 0.2)
+        play_end = max(deadlines.get(s.id, start + 0.3), play_start + 0.2)
         slot = play_end - play_start
 
         gap = play_start - cursor

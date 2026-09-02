@@ -6,7 +6,7 @@ import asyncio
 import time
 from pathlib import Path
 
-from . import audio, cache, chunks, events, queue, review, transcription, translation, tts
+from . import audio, cache, chunks, events, queue, review, subtitles, transcription, translation, tts
 from .jobs import CancellationToken, create_job, update_job_state, video_work_dir
 from .models import (
     AudioMode,
@@ -55,6 +55,51 @@ def _has_vi(work: Path) -> bool:
     return bool(segs and all(s.text_vi for s in segs))
 
 
+def _needs_whisper(cfg: JobConfig) -> bool:
+    return cfg.start_from not in (StartFrom.TTS, StartFrom.MUX)
+
+
+def _ensure_whisper(model_box: list, cfg: JobConfig) -> object:
+    """Load Whisper on first use (SRT-preferred jobs skip it until a video has no sidecar)."""
+    if model_box:
+        return model_box[0]
+    loaded, device_info = transcription.load_whisper_model(
+        cfg.whisper_model,
+        prefer_gpu=cfg.prefer_gpu,
+    )
+    model_box.append(loaded)
+    if device_info.fallback_reason:
+        events.log(device_info.fallback_reason, level="warn")
+    return loaded
+
+
+def _mark_subtitle_progress(tracker: ProgressTracker, segments_vi: list, source: str) -> None:
+    tracker.skip_asr_pipeline(f"Dùng phụ đề có sẵn ({len(segments_vi)} đoạn)")
+    events.log(f"Dùng phụ đề có sẵn: {source} ({len(segments_vi)} đoạn) — bỏ qua nhận dạng và dịch")
+
+
+def _try_load_existing_subtitles(
+    video: Path,
+    work: Path,
+    cfg: JobConfig,
+    tracker: ProgressTracker,
+) -> list | None:
+    """Load Vietnamese SRT/VTT when a sidecar exists. None → fall back to ASR + translate."""
+    if cfg.start_from in (StartFrom.TTS, StartFrom.MUX) and _has_vi(work):
+        segments_vi = cache.load_segments(work / cache.TRANSCRIPT_VI) or []
+        _mark_subtitle_progress(tracker, segments_vi, "cache")
+        return segments_vi
+
+    sub_path = subtitles.find_subtitle_for_video(video, cfg.subtitle_files)
+    if sub_path is None:
+        return None
+    segments_vi = subtitles.parse_subtitle_file(sub_path)
+    cache.save_segments(work / cache.TRANSCRIPT_VI, segments_vi)
+    cache.save_segments(work / cache.TRANSCRIPT_EN, segments_vi)
+    _mark_subtitle_progress(tracker, segments_vi, sub_path.name)
+    return segments_vi
+
+
 def process_one(
     video: Path,
     model_box: list,
@@ -72,7 +117,6 @@ def process_one(
     model_box is a 0/1-item list holding the Whisper model so we can drop the
     caller's reference before XTTS (needed to actually free VRAM).
     """
-    model = model_box[0] if model_box else None
     name = video.stem
     work = video_work_dir(job_root, name)
     output = queue.output_path_for(video, cfg.output_dir)
@@ -102,6 +146,32 @@ def process_one(
     events.log(f"Độ dài: {duration / 60:.1f} phút")
     tracker.emit(1, 1, f"Độ dài {duration / 60:.1f} phút")
 
+    segments: list = []
+    segments_vi: list = []
+    if cfg.use_existing_subtitles:
+        loaded_subs = _try_load_existing_subtitles(video, work, cfg, tracker)
+        if loaded_subs is not None:
+            cancel.check()
+            return _after_translation(
+                video=video,
+                work=work,
+                output=output,
+                segments_vi=loaded_subs,
+                duration=duration,
+                cfg=cfg,
+                cancel=cancel,
+                t0=t0,
+                tracker=tracker,
+                model_box=model_box,
+            )
+        events.log(
+            f"Không thấy *_vi.srt cho {video.name} — chuyển sang tự dịch (nhận dạng + dịch)"
+        )
+
+    model = _ensure_whisper(model_box, cfg) if _needs_whisper(cfg) else (
+        model_box[0] if model_box else None
+    )
+
     # --- extract ---
     if cfg.start_from == StartFrom.EXTRACT or not _should_skip_extract(work, cfg.start_from):
         if cfg.start_from == StartFrom.EXTRACT:
@@ -117,8 +187,6 @@ def process_one(
     cancel.check()
 
     use_chunks = chunks.should_use_chunks(duration, cfg)
-    segments: list = []
-    segments_vi: list = []
 
     if use_chunks and cfg.start_from in (
         StartFrom.AUTO,
@@ -206,7 +274,36 @@ def process_one(
                 concurrency=cfg.translate_concurrency,
             )
 
-    events.log(f"Số đoạn: {len(segments)}")
+    cancel.check()
+    return _after_translation(
+        video=video,
+        work=work,
+        output=output,
+        segments_vi=segments_vi,
+        duration=duration,
+        cfg=cfg,
+        cancel=cancel,
+        t0=t0,
+        tracker=tracker,
+        model_box=model_box,
+    )
+
+
+def _after_translation(
+    *,
+    video: Path,
+    work: Path,
+    output: Path,
+    segments_vi,
+    duration: float,
+    cfg: JobConfig,
+    cancel: CancellationToken,
+    t0: float,
+    tracker: ProgressTracker,
+    model_box: list,
+) -> Path | None:
+    name = video.stem
+    events.log(f"Số đoạn: {len(segments_vi)}")
     cancel.check()
 
     script_path = work / cache.SCRIPT_VI
@@ -236,7 +333,6 @@ def process_one(
     # Drop every Python ref to Whisper/NLLB before XTTS so CUDA memory can be freed.
     if (cfg.tts_provider or "").lower().startswith("xtts"):
         model_box.clear()
-        model = None
         transcription.unload_whisper_model()
         try:
             from .providers import offline as offline_providers
@@ -457,6 +553,8 @@ def run_job(cfg: JobConfig) -> int:
             "translate_provider": cfg.translate_provider,
             "tts_provider": cfg.tts_provider,
             "xtts_speaker_wav": cfg.xtts_speaker_wav,
+            "use_existing_subtitles": cfg.use_existing_subtitles,
+            "subtitle_files": [str(p) for p in cfg.subtitle_files],
         },
         job_id=cfg.job_id,
     )
@@ -487,17 +585,10 @@ def run_job(cfg: JobConfig) -> int:
             qdata = existing
         events.queue_updated(qdata)
 
-        need_model = cfg.start_from not in (StartFrom.TTS, StartFrom.MUX)
         model_box: list = []
-        if need_model:
-            # Still may need model if cache missing
-            loaded, device_info = transcription.load_whisper_model(
-                cfg.whisper_model,
-                prefer_gpu=cfg.prefer_gpu,
-            )
-            model_box.append(loaded)
-            if device_info.fallback_reason:
-                events.log(device_info.fallback_reason, level="warn")
+        # SRT-preferred jobs skip Whisper until a video has no sidecar.
+        if _needs_whisper(cfg) and not cfg.use_existing_subtitles:
+            _ensure_whisper(model_box, cfg)
 
         failed: list[str] = []
         review_paused: list[str] = []
@@ -546,13 +637,7 @@ def run_job(cfg: JobConfig) -> int:
             )
             try:
                 cancel.check()
-                # Lazy-load model if first file that needs it (or after XTTS unload)
-                if not model_box:
-                    loaded, device_info = transcription.load_whisper_model(
-                        cfg.whisper_model,
-                        prefer_gpu=cfg.prefer_gpu,
-                    )
-                    model_box.append(loaded)
+                # Whisper is loaded in process_one (including SRT → auto-translate fallback).
                 out = process_one(
                     video,
                     model_box,

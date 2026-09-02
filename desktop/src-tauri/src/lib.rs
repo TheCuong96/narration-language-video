@@ -1,4 +1,5 @@
 mod engine;
+mod media_scan;
 
 use engine::{EngineState, JobOptions};
 use serde_json::Value;
@@ -12,6 +13,12 @@ async fn pick_videos(app: AppHandle) -> Result<Vec<String>, String> {
         .dialog()
         .file()
         .add_filter("Video", &["mp4", "mkv", "mov", "avi", "webm"])
+        .add_filter(
+            "Video và phụ đề SRT",
+            &["mp4", "mkv", "mov", "avi", "webm", "srt", "vtt"],
+        )
+        .add_filter("Phụ đề SRT/VTT", &["srt", "vtt"])
+        .add_filter("Tất cả", &["*"])
         .set_title("Chọn video")
         .blocking_pick_files();
     let mut out = Vec::new();
@@ -23,6 +30,22 @@ async fn pick_videos(app: AppHandle) -> Result<Vec<String>, String> {
         }
     }
     Ok(out)
+}
+
+#[tauri::command]
+async fn pick_input_folder(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let dir = app
+        .dialog()
+        .file()
+        .set_title("Chọn thư mục chứa video")
+        .blocking_pick_folder();
+    Ok(dir.and_then(|d| d.into_path().ok().map(|p| p.to_string_lossy().to_string())))
+}
+
+#[tauri::command]
+async fn expand_and_match_media(paths: Vec<String>) -> Result<media_scan::MediaScan, String> {
+    Ok(media_scan::expand_and_match(&paths))
 }
 
 #[tauri::command]
@@ -279,6 +302,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             pick_videos,
+            pick_input_folder,
+            expand_and_match_media,
             pick_output_dir,
             pick_download_dir,
             pick_speaker_wav,

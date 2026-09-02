@@ -17,9 +17,11 @@ import {
   listXttsSpeakers,
   openFolder,
   pickDownloadDir,
+  pickInputFolder,
   pickOutputDir,
   pickSpeakerWav,
   pickVideos,
+  expandAndMatchMedia,
   probeVideos,
   resumeJob,
   retryFailed,
@@ -29,6 +31,10 @@ import {
   enqueueVideos,
   startJob,
   urlHelp as fetchUrlHelp,
+  isLikelyFolderPath,
+  isSubtitlePath,
+  isVideoPath,
+  splitMediaPaths,
   type UrlHelpInfo,
 } from "./lib/engine";
 import {
@@ -86,6 +92,9 @@ const defaultSettings: AppSettings = {
   voice: "vi-VN-HoaiMyNeural",
   audio_mode: "vi_only",
   review_by_default: false,
+  force_rerun: false,
+  source_lang: "en",
+  use_existing_subtitles: false,
   translate_provider: "deep-translator",
   tts_provider: "edge-tts",
   xtts_speaker_wav: "",
@@ -149,6 +158,8 @@ export default function App() {
   const [review, setReview] = useState(false);
   const [force, setForce] = useState(false);
   const [preferGpu, setPreferGpu] = useState(false);
+  const [useExistingSubtitles, setUseExistingSubtitles] = useState(false);
+  const [subtitleFiles, setSubtitleFiles] = useState<string[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [busy, setBusy] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
@@ -204,6 +215,8 @@ export default function App() {
   const urlDownloadedPathsRef = useRef<Set<string>>(new Set());
   /** Debounce writing remembered dirs into settings.json. */
   const dirPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Debounce writing numeric dub prefs (mix dB slider). */
+  const dubPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Latest settings snapshot for flush-on-unmount. */
   const settingsRef = useRef<AppSettings>(settings);
   settingsRef.current = settings;
@@ -297,6 +310,39 @@ export default function App() {
         if (opts?.immediate) persist();
         else {
           dirPersistTimerRef.current = setTimeout(persist, 400);
+        }
+        return next;
+      });
+    },
+    [pushLog],
+  );
+
+  /** Persist Dub-page choices immediately (voice, GPU, source lang, …). */
+  const patchSettings = useCallback(
+    (patch: Partial<AppSettings>, opts?: { debounceMs?: number }) => {
+      setSettings((prev) => {
+        const next: AppSettings = { ...prev, ...patch };
+        settingsRef.current = next;
+        if (!settingsHydratedRef.current) return next;
+        const persist = () => {
+          void saveSettings(next).catch((e) => {
+            pushLog({
+              text: `Không lưu cài đặt: ${e}`,
+              cls: "warn",
+            });
+          });
+        };
+        if (opts?.debounceMs) {
+          if (dubPersistTimerRef.current) {
+            clearTimeout(dubPersistTimerRef.current);
+          }
+          dubPersistTimerRef.current = setTimeout(persist, opts.debounceMs);
+        } else {
+          if (dubPersistTimerRef.current) {
+            clearTimeout(dubPersistTimerRef.current);
+            dubPersistTimerRef.current = null;
+          }
+          persist();
         }
         return next;
       });
@@ -557,6 +603,8 @@ export default function App() {
         setAudioMode(merged.audio_mode);
         setMixDb(merged.mix_original_db);
         setReview(merged.review_by_default);
+        setForce(merged.force_rerun ?? false);
+        setUseExistingSubtitles(merged.use_existing_subtitles ?? false);
         setPreferGpu(merged.device_mode === "auto");
 
         const diskOut = (merged.default_output_dir || "").trim();
@@ -694,6 +742,15 @@ export default function App() {
           });
         }
       }
+      if (dubPersistTimerRef.current) {
+        clearTimeout(dubPersistTimerRef.current);
+        dubPersistTimerRef.current = null;
+        if (settingsHydratedRef.current) {
+          void saveSettings(settingsRef.current).catch(() => {
+            /* app closing */
+          });
+        }
+      }
     };
   }, [pushLog]);
 
@@ -703,13 +760,51 @@ export default function App() {
       for (const p of paths) urlDownloadedPathsRef.current.add(p);
     }
 
-    const fresh = paths.filter((p) => !files.includes(p));
-    const merged = Array.from(new Set([...files, ...paths]));
+    let videos: string[] = [];
+    let subtitles: string[] = [];
+    let matched = 0;
+    try {
+      const scan = await expandAndMatchMedia(paths);
+      videos = scan.videos;
+      subtitles = scan.subtitles;
+      matched = scan.matches.length;
+    } catch {
+      const split = splitMediaPaths(paths);
+      videos = split.videos;
+      subtitles = split.subtitles;
+    }
+
+    if (subtitles.length || matched) {
+      if (subtitles.length) {
+        setSubtitleFiles((prev) => Array.from(new Set([...prev, ...subtitles])));
+      }
+      if (matched > 0) {
+        pushLog({
+          text: `Đã thấy ${matched}/${videos.length || matched} video có file *_vi.srt. Giữ Tự dịch, hoặc chọn «Dùng phụ đề SRT» để đọc file (video không có SRT vẫn tự dịch).`,
+        });
+      } else if (subtitles.length) {
+        pushLog({
+          text: `Đã gắn ${subtitles.length} file phụ đề. Giữ Tự dịch, hoặc chọn «Dùng phụ đề SRT» nếu muốn đọc file.`,
+        });
+      }
+    }
+    if (!videos.length) {
+      if (!subtitles.length) {
+        pushLog({
+          text: "Không có video hoặc phụ đề *_vi.srt trong lựa chọn",
+          cls: "warn",
+        });
+      }
+      return null;
+    }
+
+    const fresh = videos.filter((p) => !files.includes(p));
+    const merged = Array.from(new Set([...files, ...videos]));
     setFiles(merged);
 
-    const nextSource = cloneSource || paths[0] || "";
-    if (!cloneSource && paths[0]) {
-      setCloneSource(paths[0]);
+    const nextSource = cloneSource || videos[0] || "";
+    if (!cloneSource && videos[0]) {
+      setCloneSource(videos[0]);
     }
 
     // Busy but startJob has not returned jobId yet — buffer for flush after start.
@@ -864,8 +959,8 @@ export default function App() {
           else if (event.payload.type === "drop") {
             setDragOver(false);
             if (downloadingUrl) return;
-            const paths = (event.payload.paths || []).filter((p) =>
-              /\.(mp4|mkv|mov|avi|webm)$/i.test(p),
+            const paths = (event.payload.paths || []).filter(
+              (p) => isVideoPath(p) || isSubtitlePath(p) || isLikelyFolderPath(p),
             );
             if (paths.length) void addFilesRef.current(paths);
           }
@@ -882,6 +977,16 @@ export default function App() {
     try {
       const picked = await pickVideos();
       if (picked?.length) await addFiles(picked);
+    } catch (e) {
+      pushLog({ text: String(e), cls: "warn" });
+    }
+  }
+
+  async function onPickFolder() {
+    if (downloadingUrl) return;
+    try {
+      const dir = await pickInputFolder();
+      if (dir) await addFiles([dir]);
     } catch (e) {
       pushLog({ text: String(e), cls: "warn" });
     }
@@ -1113,6 +1218,8 @@ export default function App() {
         setPreferGpu(merged.device_mode === "auto");
         setModel(merged.whisper_model);
         setVoice(merged.voice);
+        setForce(merged.force_rerun ?? false);
+        setUseExistingSubtitles(merged.use_existing_subtitles ?? false);
         settingsHydratedRef.current = true;
       } catch (e) {
         setErrFriendly({
@@ -1124,8 +1231,8 @@ export default function App() {
         return;
       }
     }
-    const useGpu =
-      settingsRef.current.device_mode === "auto" ? true : preferGpu;
+    const useGpu = settingsRef.current.device_mode === "auto";
+    const sourceLang = settingsRef.current.source_lang || "en";
     try {
       const status = await getEngineStatus();
       // Intentional multi-window is fine. Only warn on likely leak (many leftovers).
@@ -1172,11 +1279,14 @@ export default function App() {
           outputDir,
           voice,
           model,
+          sourceLang,
           audioMode,
           mixDb,
           review,
           force,
           preferGpu: useGpu,
+          useExistingSubtitles,
+          subtitleFiles,
           translateProvider: settings.translate_provider || "deep-translator",
           ttsProvider: settings.tts_provider || "edge-tts",
           xttsSpeakerWav: settings.xtts_speaker_wav || "",
@@ -1485,11 +1595,14 @@ export default function App() {
           outputDir={outputDir}
           voice={voice}
           model={model}
+          sourceLang={settings.source_lang || "en"}
           audioMode={audioMode}
           mixDb={mixDb}
           review={review}
           force={force}
           preferGpu={preferGpu}
+          useExistingSubtitles={useExistingSubtitles}
+          subtitleCount={subtitleFiles.length}
           ttsProvider={settings.tts_provider || "edge-tts"}
           xttsSpeakers={xttsSpeakers}
           xttsSpeakerWav={settings.xtts_speaker_wav || ""}
@@ -1511,18 +1624,43 @@ export default function App() {
           onDragLeave={() => setDragOver(false)}
           onDrop={onBrowserDrop}
           onPickFiles={onPickFiles}
+          onPickFolder={onPickFolder}
           onPickOut={onPickOut}
           onChangeOutput={(v) => rememberDir("output", v)}
-          onVoice={setVoice}
-          onXttsSpeaker={(path) =>
-            setSettings((s) => ({ ...s, xtts_speaker_wav: path }))
-          }
-          onModel={setModel}
-          onAudioMode={setAudioMode}
-          onMixDb={setMixDb}
-          onReview={setReview}
-          onForce={setForce}
-          onGpu={setPreferGpu}
+          onVoice={(v) => {
+            setVoice(v);
+            patchSettings({ voice: v });
+          }}
+          onXttsSpeaker={(path) => patchSettings({ xtts_speaker_wav: path })}
+          onModel={(v) => {
+            setModel(v);
+            patchSettings({ whisper_model: v });
+          }}
+          onSourceLang={(v) => patchSettings({ source_lang: v })}
+          onAudioMode={(v) => {
+            setAudioMode(v);
+            patchSettings({ audio_mode: v });
+          }}
+          onMixDb={(v) => {
+            setMixDb(v);
+            patchSettings({ mix_original_db: v }, { debounceMs: 400 });
+          }}
+          onReview={(v) => {
+            setReview(v);
+            patchSettings({ review_by_default: v });
+          }}
+          onForce={(v) => {
+            setForce(v);
+            patchSettings({ force_rerun: v });
+          }}
+          onUseExistingSubtitles={(v) => {
+            setUseExistingSubtitles(v);
+            patchSettings({ use_existing_subtitles: v });
+          }}
+          onGpu={(v) => {
+            setPreferGpu(v);
+            patchSettings({ device_mode: v ? "auto" : "cpu" });
+          }}
           onStart={onStart}
           onStop={onStop}
           onResume={onResume}
@@ -1561,6 +1699,8 @@ export default function App() {
               setAudioMode(settings.audio_mode);
               setMixDb(settings.mix_original_db);
               setReview(settings.review_by_default);
+              setForce(settings.force_rerun ?? false);
+              setUseExistingSubtitles(settings.use_existing_subtitles ?? false);
               setPreferGpu(settings.device_mode === "auto");
               const out = (settings.default_output_dir || "").trim();
               const dl = (settings.default_download_dir || "").trim();

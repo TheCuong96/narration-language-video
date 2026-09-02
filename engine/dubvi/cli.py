@@ -44,6 +44,18 @@ def _add_run_shared(p: argparse.ArgumentParser) -> None:
     p.add_argument("--review", action="store_true")
     p.add_argument("--translate-only", action="store_true")
     p.add_argument(
+        "--use-subtitles",
+        action="store_true",
+        help="Bỏ qua nhận dạng + dịch; dùng file SRT/VTT tiếng Việt cạnh video",
+    )
+    p.add_argument(
+        "--subtitles",
+        nargs="+",
+        type=Path,
+        default=[],
+        help="Đường dẫn file SRT/VTT (khớp theo tên video)",
+    )
+    p.add_argument(
         "--translate-provider",
         default=None,
         help="deep-translator (online) | nllb (offline)",
@@ -289,6 +301,8 @@ def _cfg_from_run(args: argparse.Namespace) -> JobConfig:
         tts_concurrency=int(tts_conc or 0),
         tts_max_concurrency=int(tts_max or 0),
         translate_concurrency=int(translate_conc or 0),
+        use_existing_subtitles=bool(getattr(args, "use_subtitles", False)),
+        subtitle_files=[Path(p) for p in (getattr(args, "subtitles", None) or [])],
     )
 
 
@@ -724,6 +738,8 @@ def main(argv: list[str] | None = None) -> int:
             tts_provider=opts.get("tts_provider") or "edge-tts",
             xtts_speaker_wav=opts.get("xtts_speaker_wav") or "",
             whisper_model=opts.get("model") or DEFAULT_MODEL,
+            use_existing_subtitles=bool(opts.get("use_existing_subtitles")),
+            subtitle_files=[Path(p) for p in (opts.get("subtitle_files") or [])],
         )
         return continue_stem(cfg, args.stem)
 
@@ -756,6 +772,8 @@ def main(argv: list[str] | None = None) -> int:
             translate_provider=opts.get("translate_provider") or "deep-translator",
             tts_provider=opts.get("tts_provider") or "edge-tts",
             xtts_speaker_wav=opts.get("xtts_speaker_wav") or "",
+            use_existing_subtitles=bool(opts.get("use_existing_subtitles")),
+            subtitle_files=[Path(p) for p in (opts.get("subtitle_files") or [])],
         )
         return run_job(cfg)
 
@@ -801,6 +819,8 @@ def main(argv: list[str] | None = None) -> int:
             translate_provider=opts.get("translate_provider") or "deep-translator",
             tts_provider=opts.get("tts_provider") or "edge-tts",
             xtts_speaker_wav=opts.get("xtts_speaker_wav") or "",
+            use_existing_subtitles=bool(opts.get("use_existing_subtitles")),
+            subtitle_files=[Path(p) for p in (opts.get("subtitle_files") or [])],
         )
         return run_job(cfg)
 

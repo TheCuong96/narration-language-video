@@ -100,6 +100,18 @@ FRIENDLY: dict[str, FriendlyError] = {
         "Một số đoạn tiếng Việt còn trống hoặc sai định dạng.",
         "",
     ),
+    ErrorCode.SUBTITLE_NOT_FOUND.value: FriendlyError(
+        ErrorCode.SUBTITLE_NOT_FOUND.value,
+        "Không thấy file phụ đề",
+        "Đã chọn dùng phụ đề có sẵn nhưng không tìm thấy file SRT/VTT cạnh video.",
+        "Cần file «tên-video_vi.srt» trong cùng thư mục, hoặc để app tự dịch video đó (chế độ Dùng phụ đề SRT sẽ tự dịch nếu thiếu file).",
+    ),
+    ErrorCode.SUBTITLE_INVALID.value: FriendlyError(
+        ErrorCode.SUBTITLE_INVALID.value,
+        "File phụ đề không đọc được",
+        "File SRT/VTT rỗng, sai định dạng, hoặc không có câu kèm thời gian.",
+        "Mở file phụ đề bằng Notepad để kiểm tra có số thứ tự và dòng thời gian 00:00:00,000 --> …",
+    ),
     ErrorCode.YTDLP_NOT_FOUND.value: FriendlyError(
         ErrorCode.YTDLP_NOT_FOUND.value,
         "Thiếu yt-dlp",

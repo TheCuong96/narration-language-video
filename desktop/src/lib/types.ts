@@ -92,11 +92,14 @@ export interface JobOptions {
   outputDir: string;
   voice: string;
   model: string;
+  sourceLang: string;
   audioMode: AudioMode;
   mixDb: number;
   review: boolean;
   force: boolean;
   preferGpu: boolean;
+  useExistingSubtitles?: boolean;
+  subtitleFiles?: string[];
   translateProvider: string;
   ttsProvider: string;
   xttsSpeakerWav?: string;
@@ -139,6 +142,9 @@ export interface AppSettings {
   voice: string;
   audio_mode: AudioMode;
   review_by_default: boolean;
+  force_rerun: boolean;
+  source_lang: string;
+  use_existing_subtitles: boolean;
   translate_provider: string;
   tts_provider: string;
   xtts_speaker_wav?: string;
@@ -146,6 +152,18 @@ export interface AppSettings {
   tts_concurrency?: number;
   /** 0 = auto cap 96 when adaptive. */
   tts_max_concurrency?: number;
+}
+
+export interface SubtitleMatch {
+  video: string;
+  subtitle: string;
+}
+
+export interface MediaScan {
+  folder: string;
+  videos: string[];
+  subtitles: string[];
+  matches: SubtitleMatch[];
 }
 
 export interface ProbeInfo {
