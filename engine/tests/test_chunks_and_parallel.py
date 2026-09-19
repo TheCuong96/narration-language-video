@@ -127,3 +127,37 @@ def test_synthesize_all_runs_concurrently(tmp_path):
 
     assert len(paths) == 6
     assert peak >= 2
+
+
+def test_tts_retry_keeps_normal_source_rate(tmp_path):
+    """Transport retries must not pre-speed a sentence before alignment."""
+    from dubvi.tts import tts_segment_with_backoff
+
+    class FlakyProvider:
+        requires_internet = True
+
+        def __init__(self):
+            self.rates: list[str] = []
+
+        async def synthesize(self, text, out_path, *, voice, rate):
+            self.rates.append(rate)
+            if len(self.rates) < 3:
+                raise RuntimeError("temporary network failure")
+            out_path.write_bytes(b"x" * 600)
+
+    provider = FlakyProvider()
+    out = tmp_path / "sentence.mp3"
+
+    asyncio.run(
+        tts_segment_with_backoff(
+            "Một câu hoàn chỉnh.",
+            out,
+            voice="vi-VN-HoaiMyNeural",
+            provider=provider,
+            max_attempts=3,
+            base_delay=0,
+        )
+    )
+
+    assert out.stat().st_size >= 500
+    assert provider.rates == ["+0%", "+0%", "+0%"]

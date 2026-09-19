@@ -164,16 +164,18 @@ async def tts_segment_with_backoff(
     base_delay: float = 1.5,
 ) -> None:
     out_mp3.parent.mkdir(parents=True, exist_ok=True)
-    rates = ["+0%", "+5%", "+10%", "+0%", "+15%"]
     last_err: Exception | None = None
     attempts = max_attempts if getattr(provider, "requires_internet", True) else min(2, max_attempts)
 
     for attempt in range(attempts):
-        rate = rates[attempt % len(rates)]
         try:
             if out_mp3.exists():
                 out_mp3.unlink()
-            await _tts_once(text, out_mp3, voice, rate, provider=provider)
+            # Retry must never change the source speaking rate.  Timing is
+            # decided later, after the complete sentence duration is known;
+            # otherwise a transient network error can make an otherwise short
+            # sentence permanently faster (and cache that faster MP3).
+            await _tts_once(text, out_mp3, voice, "+0%", provider=provider)
             if out_mp3.exists() and out_mp3.stat().st_size >= MIN_MP3_BYTES:
                 return
             if out_mp3.exists():

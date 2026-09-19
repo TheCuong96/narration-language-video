@@ -146,3 +146,40 @@ def test_build_narration_keeps_1x_when_gap_has_room(tmp_path: Path, wav_active_d
     assert 3.90 <= probe_duration(fitted0) <= 4.10
     active = wav_active_duration(fitted0)
     assert 2.30 <= active <= 2.70
+
+
+def test_next_sentence_resets_to_1x_after_sped_sentence(
+    tmp_path: Path, wav_active_duration
+):
+    """A long sentence must not leak its tempo decision into the next one."""
+    from dubvi import cache
+    from dubvi.audio import build_narration
+    from dubvi.models import Segment
+
+    work = tmp_path / "work"
+    work.mkdir()
+    segs_dir = work / cache.SEGMENTS_DIR
+    segs_dir.mkdir()
+
+    segments = [
+        Segment(id=0, start=0.0, end=0.8, text_en="long", text_vi="câu dài"),
+        Segment(id=1, start=1.0, end=1.8, text_en="short", text_vi="câu ngắn"),
+    ]
+    long_src = segs_dir / "0000.mp3"
+    short_src = segs_dir / "0001.mp3"
+    _make_tone(long_src, 1.8, freq=330)
+    _make_tone(short_src, 0.4, freq=440)
+
+    build_narration(
+        segments,
+        work,
+        video_duration=2.0,
+        mp3_paths={0: long_src, 1: short_src},
+    )
+
+    sped = work / cache.FITTED_DIR / "0000.wav"
+    reset = work / cache.FITTED_DIR / "0001.wav"
+    # Sentence 0 is compressed from ~1.8s into its 1.0s allowance.
+    assert 0.85 <= wav_active_duration(sped) <= 1.05
+    # Sentence 1 remains ~0.4s at 1×; the rest of its slot is silence.
+    assert 0.32 <= wav_active_duration(reset) <= 0.52

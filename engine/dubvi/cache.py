@@ -16,13 +16,16 @@ TRANSCRIPT_EN = "transcript_en.json"
 TRANSCRIPT_VI = "transcript_vi.json"
 SCRIPT_VI = "script_vi.txt"
 AUDIO_FLAC = "audio.flac"
-NARRATION = "narration_1x.wav"
-SEGMENTS_DIR = "segments"
-# 1× default aligner (invalidates fitted_slot/ which ended every line at cue `end`)
-FITTED_DIR = "fitted_1x"
+# Cache v2 guarantees that source TTS is always generated at +0% and that any
+# required tempo is applied uniformly to one complete sentence during align.
+# New names intentionally invalidate MP3/WAV files produced by older rules.
+NARRATION = "narration_sentence_v2.wav"
+SEGMENTS_DIR = "segments_sentence_v2"
+FITTED_DIR = "fitted_sentence_v2"
 CHUNKS_DIR = "chunks"
-_LEGACY_NARRATION = ("narration_slot.wav", "narration.wav")
-_LEGACY_FITTED = ("fitted_slot", "fitted_soft", "fitted")
+_LEGACY_NARRATION = ("narration_1x.wav", "narration_slot.wav", "narration.wav")
+_LEGACY_SEGMENTS = ("segments",)
+_LEGACY_FITTED = ("fitted_1x", "fitted_slot", "fitted_soft", "fitted")
 
 
 def save_json(path: Path, data: Any) -> None:
@@ -62,7 +65,12 @@ def clear_downstream(work: Path, *, keep_en: bool = True) -> None:
         audio = work / AUDIO_FLAC
         if audio.exists():
             audio.unlink()
-    for dname in (FITTED_DIR, SEGMENTS_DIR, *_LEGACY_FITTED):
+    for dname in (
+        FITTED_DIR,
+        SEGMENTS_DIR,
+        *_LEGACY_FITTED,
+        *_LEGACY_SEGMENTS,
+    ):
         d = work / dname
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)
@@ -80,7 +88,12 @@ def cleanup_temps_after_success(work: Path, *, keep_transcripts: bool = True) ->
                 p.unlink()
             except OSError as e:
                 log.warning("cleanup %s: %s", p, e)
-    for dname in (FITTED_DIR, SEGMENTS_DIR, *_LEGACY_FITTED):
+    for dname in (
+        FITTED_DIR,
+        SEGMENTS_DIR,
+        *_LEGACY_FITTED,
+        *_LEGACY_SEGMENTS,
+    ):
         d = work / dname
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)

@@ -8,9 +8,9 @@ from . import cache, events
 from .ffmpeg import (
     concat_wavs,
     extract_audio_flac,
-    fit_audio_to_duration,
     make_silence,
     mux_video,
+    pad_or_trim_audio,
     probe_duration,
     stretch_to_duration,
 )
@@ -23,7 +23,8 @@ log = get_logger("dubvi.audio")
 # Never slow speech down. Default is 1×; speed up only when the next line (or
 # the end of the video) would be overlapped.
 MIN_TEMPO = 1.0
-# Practical ceiling for stacked atempo (≈ 8×); enough for long VI lines in short slots.
+# Legacy spill-mode ceiling. Strict sentence fitting is uncapped so content is
+# never discarded; FFmpeg stacks atempo filters for ratios above 2×.
 MAX_TEMPO = 8.0
 
 
@@ -114,23 +115,16 @@ def build_narration(
             tracker.begin_stage(Stage.ALIGNING, "Kiểm tra narration đã căn giờ trong cache")
         events.log("Dùng cache narration")
         narr_dur = probe_duration(narration)
-        if narr_dur > video_duration + 0.05 and video_duration > 0.05:
-            tempo = narr_dur / video_duration
-            events.log(
-                f"Cache narration dài hơn video ({narr_dur:.1f}s > {video_duration:.1f}s) — "
-                f"tăng tốc {tempo:.2f}× để giữ đủ nội dung"
-            )
-            fit_audio_to_duration(narration, narration, video_duration)
-        elif (
+        if (
             video_duration > 0.05
             and narr_dur > 0
-            and narr_dur < video_duration - 0.05
+            and abs(narr_dur - video_duration) > 0.01
         ):
-            pad = work / "sil_cache_pad.wav"
-            make_silence(pad, video_duration - narr_dur)
-            tmp = work / "narration.__pad__.wav"
-            concat_wavs([narration, pad], work / "concat_cache_pad.txt", tmp)
-            tmp.replace(narration)
+            events.log(
+                f"Chuẩn hóa đuôi timeline cache ({narr_dur:.2f}s → {video_duration:.2f}s), "
+                "không đổi tốc độ các câu"
+            )
+            pad_or_trim_audio(narration, narration, video_duration)
         if tracker:
             tracker.emit(1, 1, "Đã kiểm tra căn giờ từ cache")
         return narration
@@ -157,7 +151,7 @@ def build_narration(
         nat = natural_durs.get(s.id)
         tgt = targets.get(s.id)
         if nat and tgt:
-            if nat > tgt * 1.02:
+            if nat > tgt:
                 sped += 1
             else:
                 kept += 1
@@ -229,28 +223,21 @@ def build_narration(
     list_file = work / "concat.txt"
     concat_wavs(pieces, list_file, narration)
 
-    # Safety: narration must match video length for mux (-shortest).
+    # Safety: narration must match video length for mux (-shortest). Do not
+    # speed up the complete track here: each sentence has already been fitted
+    # independently, and a global atempo would make later sentences inherit
+    # the previous sentence's speed decision.
     narr_dur = probe_duration(narration)
-    if video_duration > 0.05 and narr_dur > 0:
-        if narr_dur > video_duration + 0.05:
-            tempo = narr_dur / video_duration
-            events.log(
-                f"Giọng đọc dài hơn video ({narr_dur:.1f}s > {video_duration:.1f}s) — "
-                f"tăng tốc toàn bộ {tempo:.2f}× để khớp"
-            )
-            if tracker:
-                tracker.emit(
-                    max(total, 1),
-                    max(total, 1),
-                    f"Tăng tốc giọng đọc {tempo:.2f}× để khớp video",
-                )
-            fit_audio_to_duration(narration, narration, video_duration)
-        elif narr_dur < video_duration - 0.05:
-            pad = fitted_dir / "sil_tail_fix.wav"
-            make_silence(pad, video_duration - narr_dur)
-            tmp = work / "narration.__pad__.wav"
-            concat_wavs([narration, pad], work / "concat_pad.txt", tmp)
-            tmp.replace(narration)
+    if (
+        video_duration > 0.05
+        and narr_dur > 0
+        and abs(narr_dur - video_duration) > 0.01
+    ):
+        events.log(
+            f"Chuẩn hóa đuôi timeline ({narr_dur:.2f}s → {video_duration:.2f}s), "
+            "không tăng tốc toàn bộ giọng đọc"
+        )
+        pad_or_trim_audio(narration, narration, video_duration)
 
     if tracker:
         tracker.emit(max(total, 1), max(total, 1), "Đã căn thời gian")
