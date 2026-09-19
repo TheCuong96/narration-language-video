@@ -539,7 +539,7 @@ def atempo_filter_chain(tempo: float) -> list[str]:
     while t > 2.0:
         filters.append("atempo=2.0")
         t /= 2.0
-    filters.append(f"atempo={t:.8f}")
+    filters.append(f"atempo={t:.4f}")
     return filters
 
 
@@ -611,6 +611,7 @@ def _render_tempo_to_target(
     """Render all source samples into target_sec without ever tail-trimming."""
     target = max(float(target_sec), MIN_AUDIO_DURATION)
     current_tempo = max(float(tempo), 1.0)
+    duration_tolerance = 2.0 / sample_rate
     out = dst
     tmp: Path | None = None
     if src.resolve() == dst.resolve():
@@ -619,7 +620,7 @@ def _render_tempo_to_target(
 
     try:
         actual = 0.0
-        for _attempt in range(4):
+        for _attempt in range(8):
             filters = atempo_filter_chain(current_tempo)
             # apad only extends a short result; unlike atrim it cannot discard
             # final words. If atempo rounding runs long, measure and retry the
@@ -645,7 +646,7 @@ def _render_tempo_to_target(
             actual = probe_duration(out)
             if actual <= 0:
                 raise EngineError(ErrorCode.INTERNAL, f"Không đo được audio sau atempo: {out}")
-            if actual <= target:
+            if actual <= target + duration_tolerance:
                 break
             current_tempo *= (actual / target) * 1.0005
         else:
