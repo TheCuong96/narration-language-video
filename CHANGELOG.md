@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Performance
+
+- Dịch offline NLLB xử lý theo lô (batch) thay vì từng câu một → nhanh hơn nhiều lần trên cả CPU/GPU; GPU dùng fp16, CPU giảm beam search xuống 1 (greedy) để ưu tiên tốc độ
+- TTS offline XTTS chạy suy luận trong `torch.no_grad()` → giảm bộ nhớ dùng và tăng tốc nhẹ
+
 ### Fixed
 
 - Engine PyInstaller chuyển **onedir** (không còn bung `%TEMP%\_MEI*` mỗi lần chạy)

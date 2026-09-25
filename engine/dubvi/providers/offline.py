@@ -168,7 +168,15 @@ class NllbTranslateProvider(TranslateProvider):
     name = "nllb"
     requires_internet = False
     requires_api_key = False
+    # Batch several segments into one model.generate() call instead of one
+    # Python round-trip per segment — the main local-speed lever for NLLB.
+    supports_batch = True
     model_id = "nllb-200-distilled-600M"
+    # Beam search cost scales ~linearly with beam count and CPU has little
+    # headroom to hide it, so trade a bit of quality for speed there; GPU
+    # keeps full quality since the extra beams are comparatively cheap.
+    NUM_BEAMS_CPU = 1
+    NUM_BEAMS_CUDA = 4
 
     def __init__(self, *, prefer_gpu: bool = False, model_dir: Path | None = None):
         self.prefer_gpu = prefer_gpu
@@ -216,11 +224,14 @@ class NllbTranslateProvider(TranslateProvider):
             model.eval()
             if device == "cuda":
                 try:
-                    model = model.to("cuda")
+                    # Cast to fp16 before the copy so half as many bytes cross
+                    # PCIe, then keep it — halves matmul time and VRAM on GPU
+                    # with no meaningful quality loss for translation models.
+                    model = model.half().to("cuda")
                 except Exception as e:
                     log.warning("NLLB CUDA failed, fallback CPU: %s", e)
                     device = "cpu"
-                    model = model.to("cpu")
+                    model = model.to("cpu").float()
             else:
                 model = model.to("cpu")
 
@@ -237,6 +248,14 @@ class NllbTranslateProvider(TranslateProvider):
         text = (text or "").strip()
         if not text:
             return text
+        return self.translate_batch([text], source=source, target=target)[0]
+
+    def translate_batch(self, texts: list[str], *, source: str, target: str) -> list[str]:
+        """Tokenize + generate the whole batch in one model call (padded)."""
+        cleaned = [(t or "").strip() for t in texts]
+        work_idx = [i for i, t in enumerate(cleaned) if t]
+        if not work_idx:
+            return cleaned
 
         bundle = self._load()
         tokenizer = bundle["tokenizer"]
@@ -246,22 +265,34 @@ class NllbTranslateProvider(TranslateProvider):
 
         src = to_nllb_lang(source, default="eng_Latn")
         tgt = to_nllb_lang(target, default="vie_Latn")
-
         tokenizer.src_lang = src
-        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+
+        batch_texts = [cleaned[i] for i in work_idx]
+        inputs = tokenizer(
+            batch_texts,
+            return_tensors="pt",
+            truncation=True,
+            max_length=512,
+            padding=True,
+        )
         if device == "cuda":
             inputs = {k: v.to("cuda") for k, v in inputs.items()}
 
         forced_bos = tokenizer.convert_tokens_to_ids(tgt)
+        num_beams = self.NUM_BEAMS_CUDA if device == "cuda" else self.NUM_BEAMS_CPU
         with torch.no_grad():
             generated = model.generate(
                 **inputs,
                 forced_bos_token_id=forced_bos,
                 max_new_tokens=512,
-                num_beams=4,
+                num_beams=num_beams,
             )
-        out = tokenizer.batch_decode(generated, skip_special_tokens=True)[0]
-        return (out or text).strip()
+        decoded = tokenizer.batch_decode(generated, skip_special_tokens=True)
+
+        out = list(cleaned)
+        for pos, i in enumerate(work_idx):
+            out[i] = (decoded[pos] or cleaned[i]).strip()
+        return out
 
 
 class XttsTtsProvider(TtsProvider):
@@ -402,19 +433,21 @@ class XttsTtsProvider(TtsProvider):
         bundle = self._load()
         model = bundle["model"]
         config = bundle["config"]
+        torch = bundle["torch"]
 
         lang = to_xtts_lang(self.language, default="vi")
         out_path.parent.mkdir(parents=True, exist_ok=True)
         wav_tmp = out_path.with_suffix(".xtts.wav")
 
         try:
-            outputs = model.synthesize(
-                text,
-                config,
-                speaker_wav=str(speaker),
-                gpt_cond_len=3,
-                language=lang,
-            )
+            with torch.no_grad():
+                outputs = model.synthesize(
+                    text,
+                    config,
+                    speaker_wav=str(speaker),
+                    gpt_cond_len=3,
+                    language=lang,
+                )
             import numpy as np
             import soundfile as sf
 

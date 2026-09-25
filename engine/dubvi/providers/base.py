@@ -10,10 +10,18 @@ class TranslateProvider(ABC):
     name: str
     requires_internet: bool = True
     requires_api_key: bool = False
+    # True → translate_segments() groups several texts into one translate_batch()
+    # call instead of one thread per segment (local model inference is much
+    # faster batched; network providers stay on the thread-per-request path).
+    supports_batch: bool = False
 
     @abstractmethod
     def translate(self, text: str, *, source: str, target: str) -> str:
         ...
+
+    def translate_batch(self, texts: list[str], *, source: str, target: str) -> list[str]:
+        """Default fallback for providers without real batched inference."""
+        return [self.translate(t, source=source, target=target) for t in texts]
 
     def privacy_note(self) -> str:
         return "Chỉ gửi đoạn transcript tới dịch vụ dịch đang chọn. Video không được upload."

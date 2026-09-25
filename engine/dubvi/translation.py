@@ -18,10 +18,11 @@ log = get_logger("dubvi.translation")
 
 
 def default_translate_concurrency(provider_name: str, *, prefer_gpu: bool = False) -> int:
-    """Pick safe default parallelism for the active translation backend."""
+    """Pick safe default parallelism (threads) or batch size (local models)."""
     name = (provider_name or "deep-translator").lower()
     if name.startswith("nllb") or "offline" in name:
-        return 1
+        # Batched model.generate() call, not threads — GPU handles bigger batches.
+        return 16 if prefer_gpu else 8
     return min(4, max(2, (os.cpu_count() or 4) // 2))
 
 
@@ -129,6 +130,101 @@ def _translate_one_segment(
     )
 
 
+def _translate_batch_with_backoff(
+    provider,
+    texts: list[str],
+    *,
+    source: str,
+    target: str,
+    max_attempts: int = 2,
+    base_delay: float = 0.5,
+) -> list[str]:
+    """Batch-translate with retry; halves the batch and retries on failure
+
+    (e.g. transient CUDA OOM on a long segment) instead of failing every
+    segment in the batch.
+    """
+    if not texts:
+        return []
+    last_err: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            return provider.translate_batch(texts, source=source, target=target)
+        except EngineError:
+            raise
+        except Exception as e:
+            last_err = e
+            delay = base_delay * (2**attempt)
+            log.warning(
+                "batch translate (%d đoạn) lần %s lỗi: %s; sleep %.1fs",
+                len(texts),
+                attempt + 1,
+                e,
+                delay,
+            )
+            time.sleep(delay)
+    if len(texts) == 1:
+        raise EngineError(
+            ErrorCode.TRANSLATE_FAILED,
+            f"Dịch thất bại sau {max_attempts} lần: {last_err}",
+        )
+    mid = len(texts) // 2
+    log.warning(
+        "Chia nhỏ batch dịch (%d → %d + %d) sau lỗi: %s",
+        len(texts),
+        mid,
+        len(texts) - mid,
+        last_err,
+    )
+    left = _translate_batch_with_backoff(provider, texts[:mid], source=source, target=target)
+    right = _translate_batch_with_backoff(provider, texts[mid:], source=source, target=target)
+    return left + right
+
+
+def _translate_batch_segments(
+    batch: list[Segment],
+    *,
+    translator,
+    src: str,
+    target_lang: str,
+    terms: list[str],
+) -> list[Segment]:
+    """Translate several segments in one model call; falls back per-segment on failure."""
+    protected_texts: list[str] = []
+    mappings: list[dict[str, str]] = []
+    for s in batch:
+        protected, mapping = protect_terms(s.text_en, terms)
+        protected_texts.append(protected)
+        mappings.append(mapping)
+
+    try:
+        outputs = _translate_batch_with_backoff(
+            translator, protected_texts, source=src, target=target_lang
+        )
+    except Exception as e:
+        log.warning("batch translate thất bại (%d đoạn), dịch từng đoạn: %s", len(batch), e)
+        return [
+            _translate_one_segment(
+                s, translator=translator, src=src, target_lang=target_lang, terms=terms
+            )
+            for s in batch
+        ]
+
+    result: list[Segment] = []
+    for s, mapping, out in zip(batch, mappings, outputs):
+        vi = restore_terms(out or s.text_en, mapping)
+        result.append(
+            Segment(
+                id=s.id,
+                start=s.start,
+                end=s.end,
+                text_en=s.text_en,
+                text_vi=clean_vi(vi),
+            )
+        )
+    return result
+
+
 def translate_segments(
     segments: list[Segment],
     out_path: Path,
@@ -161,21 +257,27 @@ def translate_segments(
         provider_name, prefer_gpu=prefer_gpu
     )
     workers = max(1, min(workers, max(len(segments), 1)))
+    # Local models (NLLB) translate a whole batch in one model call instead of
+    # one thread per segment — much faster than either serial or thread-pool.
+    use_batch = getattr(translator, "supports_batch", False) and not translator.requires_internet
+    mode_label = f"lô {workers} đoạn" if use_batch else f"{workers} luồng"
 
     if tracker:
         tracker.begin_stage(
             Stage.TRANSLATING,
-            f"Đang dịch {len(segments)} đoạn ({src} → {target_lang}, {workers} luồng) "
+            f"Đang dịch {len(segments)} đoạn ({src} → {target_lang}, {mode_label}) "
             f"[{translator.name}]",
         )
     else:
         events.stage(
             Stage.TRANSLATING,
-            f"Đang dịch {len(segments)} đoạn ({src} → {target_lang}, {workers} luồng) "
+            f"Đang dịch {len(segments)} đoạn ({src} → {target_lang}, {mode_label}) "
             f"[{translator.name}]",
         )
     events.log(translator.privacy_note())
-    if workers > 1:
+    if use_batch:
+        events.log(f"Dịch theo lô: {workers} đoạn/lượt (model chạy trên máy)")
+    elif workers > 1:
         events.log(f"Dịch song song: {workers} đoạn cùng lúc")
 
     # Resume: reuse already-translated segments
@@ -213,7 +315,24 @@ def translate_segments(
                 filled.append(s)
         cache.save_segments(out_path, filled)
 
-    if pending and workers > 1:
+    if pending and use_batch:
+        for start in range(0, len(pending), workers):
+            chunk = pending[start : start + workers]
+            if cancel:
+                cancel.check()
+            batch_segments = [s for _, s in chunk]
+            for seg in _translate_batch_segments(
+                batch_segments,
+                translator=translator,
+                src=src,
+                target_lang=target_lang,
+                terms=terms,
+            ):
+                translated[seg.id] = seg
+                done += 1
+            _emit_progress()
+            _maybe_save_partial()
+    elif pending and workers > 1:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
                 pool.submit(
