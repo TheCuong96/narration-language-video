@@ -608,10 +608,23 @@ def _render_tempo_to_target(
     *,
     sample_rate: int = 24000,
 ) -> float:
-    """Render all source samples into target_sec without ever tail-trimming."""
+    """
+    Render all source samples into target_sec, correcting atempo rounding by
+    retrying with a slightly higher uniform tempo.
+
+    Extremely tight slots (two lines almost back-to-back) can hit an atempo
+    rounding floor that no amount of extra speed fixes within a bounded number
+    of retries. As a last resort we hard-cut the tiny unconverged remainder
+    instead of failing the whole video: losing a few ms off one already very
+    crammed sentence is far better than aborting the export, or silently
+    leaving every later line drifting out of sync with the video.
+    """
+    from . import events
+
     target = max(float(target_sec), MIN_AUDIO_DURATION)
     current_tempo = max(float(tempo), 1.0)
     duration_tolerance = 2.0 / sample_rate
+    max_attempts = 12
     out = dst
     tmp: Path | None = None
     if src.resolve() == dst.resolve():
@@ -620,7 +633,7 @@ def _render_tempo_to_target(
 
     try:
         actual = 0.0
-        for _attempt in range(8):
+        for attempt in range(max_attempts):
             filters = atempo_filter_chain(current_tempo)
             # apad only extends a short result; unlike atrim it cannot discard
             # final words. If atempo rounding runs long, measure and retry the
@@ -648,12 +661,39 @@ def _render_tempo_to_target(
                 raise EngineError(ErrorCode.INTERNAL, f"Không đo được audio sau atempo: {out}")
             if actual <= target + duration_tolerance:
                 break
-            current_tempo *= (actual / target) * 1.0005
+            # Grow the safety margin each retry so slow-converging (rounding
+            # limited) cases still land inside tolerance instead of stalling
+            # just above it forever.
+            margin = 1.001 + 0.01 * attempt
+            current_tempo *= (actual / target) * margin
         else:
-            raise EngineError(
-                ErrorCode.INTERNAL,
-                f"Không thể fit toàn bộ câu vào {target:.3f}s mà không cắt đuôi",
+            events.warning(
+                "SENTENCE_TAIL_TRIMMED",
+                f"Câu quá dài so với khung {target:.3f}s (còn dư {actual - target:.3f}s sau "
+                f"{max_attempts} lần tăng tốc) — đã cắt phần dư nhỏ để giữ đồng bộ các câu sau",
+                target_sec=target,
+                actual_sec=actual,
             )
+            trim_tmp = out.with_name(out.stem + ".__trim__.wav")
+            run_ffmpeg(
+                [
+                    ffmpeg_path(),
+                    "-y",
+                    "-i",
+                    str(out),
+                    "-af",
+                    f"atrim=0:{target:.6f}",
+                    "-ar",
+                    str(sample_rate),
+                    "-ac",
+                    "1",
+                    "-c:a",
+                    "pcm_s16le",
+                    str(trim_tmp),
+                ]
+            )
+            trim_tmp.replace(out)
+            actual = target
 
         if tmp is not None:
             tmp.replace(dst)

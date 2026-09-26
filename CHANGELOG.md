@@ -12,6 +12,7 @@
 - Engine PyInstaller chuyển **onedir** (không còn bung `%TEMP%\_MEI*` mỗi lần chạy)
 - Dọn orphan `_MEI*` lúc mở app / sau khi engine thoát / hủy job; script `scripts/cleanup-mei-temp.ps1`
 - Tốc độ đọc được quyết định độc lập theo toàn bộ thời lượng từng câu: câu vừa khung giữ 1×, câu vượt khung mới tăng đều; retry TTS không còn tự đổi rate hoặc làm câu sau bị nhanh theo
+- Câu rơi vào khung cực ngắn (hai dòng phụ đề gần sát nhau, ~0.2s) không còn làm lỗi (fatal) toàn bộ video: nếu tăng tốc tối đa vẫn còn dư một chút do làm tròn atempo, engine cắt phần dư rất nhỏ đó và cảnh báo thay vì dừng cả job
 
 ## 0.1.1 — 2026-07-31
 
