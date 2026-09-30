@@ -276,17 +276,33 @@ export async function listModels(): Promise<WhisperModelInfo[]> {
 }
 
 export async function downloadModel(modelId: string, onEvent?: EventHandler): Promise<void> {
-  if (onEvent && (await isTauri())) {
-    const { listen } = await import("@tauri-apps/api/event");
-    const un = await listen<EngineEvent>("engine-event", (e) => onEvent(e.payload));
-    try {
-      await invoke("download_model", { modelId });
-    } finally {
-      un();
-    }
-    return;
-  }
-  await invoke("download_model", { modelId });
+  if (!(await isTauri())) throw new Error("Cần Tauri để tải model");
+  const { listen } = await import("@tauri-apps/api/event");
+  // Rust returns when it spawns the process. Keep listening until the actual
+  // model terminal event, otherwise progress disappears and catalog refreshes early.
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let unlisten: (() => void) | null = null;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      unlisten?.();
+      if (error) reject(error); else resolve();
+    };
+    void listen<EngineEvent>("engine-event", (event) => {
+      const ev = event.payload;
+      onEvent?.(ev);
+      if (ev.type === "completed" && ev.model === modelId) finish();
+      if (ev.type === "error" && ev.fatal) finish(new Error(ev.message || "Tải model thất bại"));
+      if (ev.type === "cancelled") finish(new Error("Đã hủy tải model"));
+      if (ev.type === "engine_exited" && ev.job_id === `model-${modelId}`) {
+        finish(new Error("Engine kết thúc trước khi tải model hoàn tất"));
+      }
+    }).then((un) => {
+      unlisten = un;
+      void invoke("download_model", { modelId }).catch((error) => finish(new Error(String(error))));
+    }).catch((error) => finish(new Error(String(error))));
+  });
 }
 
 export async function deleteModel(modelId: string): Promise<void> {
@@ -341,4 +357,8 @@ export function filterVideoFiles(files: FileList | File[]): File[] {
   return Array.from(files).filter((f) =>
     exts.some((e) => f.name.toLowerCase().endsWith(e)),
   );
+}
+
+export async function openOllamaDownload(): Promise<void> {
+  await invoke("open_ollama_download");
 }

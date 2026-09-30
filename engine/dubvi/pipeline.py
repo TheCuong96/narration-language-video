@@ -78,6 +78,14 @@ def _mark_subtitle_progress(tracker: ProgressTracker, segments_vi: list, source:
     events.log(f"Dùng phụ đề có sẵn: {source} ({len(segments_vi)} đoạn) — bỏ qua nhận dạng và dịch")
 
 
+def _vi_cache_matches(work, cfg):
+    segments = cache.load_segments(work / cache.TRANSCRIPT_EN)
+    return bool(segments) and translation.cache_matches(
+        work / cache.TRANSCRIPT_VI, segments, source_lang=cfg.source_lang,
+        target_lang=cfg.target_lang, provider_name=cfg.translate_provider,
+        terms=cfg.terms, fallback_online=cfg.translate_fallback_online)
+
+
 def _try_load_existing_subtitles(
     video: Path,
     work: Path,
@@ -126,7 +134,12 @@ def process_one(
         file_name=video.name,
     )
 
-    if output.exists() and not cfg.force and cfg.start_from == StartFrom.AUTO:
+    translation_changed = not cfg.use_existing_subtitles and _has_vi(work) and not _vi_cache_matches(work, cfg)
+    if translation_changed:
+        events.log("Cache bản dịch không khớp provider/model; tiến hành dịch lại")
+        cache.clear_downstream(work, keep_en=True)
+
+    if output.exists() and not cfg.force and not translation_changed and cfg.start_from == StartFrom.AUTO:
         events.log(f"Bỏ qua (đã có): {output.name}")
         events.file_completed(str(video), str(output), skipped=True)
         queue.update_item(cfg.job_id, name, status=QueueItemStatus.SKIPPED, output=str(output))
@@ -210,7 +223,7 @@ def process_one(
             tracker.begin_stage(Stage.TRANSLATING, "Dùng cache bản dịch (chunk)")
             tracker.emit(1, 1, f"Cache: {len(segments_vi)} đoạn")
             events.log("Dùng cache bản dịch chunk đã ghép")
-        elif _has_vi(work) and cfg.start_from == StartFrom.AUTO:
+        elif _has_vi(work) and cfg.start_from == StartFrom.AUTO and _vi_cache_matches(work, cfg):
             segments_vi = cache.load_segments(merged_vi) or []
             segments = cache.load_segments(merged_en) or []
             tracker.begin_stage(Stage.TRANSLATING, "Dùng cache bản dịch (chunk)")
@@ -272,6 +285,7 @@ def process_one(
                 provider_name=cfg.translate_provider,
                 prefer_gpu=cfg.prefer_gpu,
                 concurrency=cfg.translate_concurrency,
+                fallback_online=cfg.translate_fallback_online,
             )
 
     cancel.check()
@@ -551,6 +565,11 @@ def run_job(cfg: JobConfig) -> int:
             "audio_mode": cfg.audio_mode.value,
             "review_translation": cfg.review_translation,
             "translate_provider": cfg.translate_provider,
+            "translate_concurrency": cfg.translate_concurrency,
+            "source_lang": cfg.source_lang,
+            "target_lang": cfg.target_lang,
+            "extra_terms": cfg.extra_terms,
+            "translate_fallback_online": cfg.translate_fallback_online,
             "tts_provider": cfg.tts_provider,
             "xtts_speaker_wav": cfg.xtts_speaker_wav,
             "use_existing_subtitles": cfg.use_existing_subtitles,

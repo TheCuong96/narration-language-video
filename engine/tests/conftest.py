@@ -33,3 +33,24 @@ def _wav_active_duration(path: Path, rel_thresh: float = 0.08) -> float:
 @pytest.fixture
 def wav_active_duration():
     return _wav_active_duration
+
+
+@pytest.fixture(autouse=True)
+def no_real_http(monkeypatch, request, tmp_path):
+    """Unit tests must never contact Ollama or public HTTP services."""
+    if request.node.get_closest_marker("integration"):
+        return
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "appdata"))
+    import requests
+    def blocked(*args, **kwargs):
+        raise requests.ConnectionError("HTTP disabled in unit tests")
+    monkeypatch.setattr(requests.Session, "request", blocked)
+
+
+def pytest_collection_modifyitems(items):
+    import os
+    if os.environ.get("DUBVI_TEST_INTEGRATION") == "1":
+        return
+    for item in items:
+        if item.get_closest_marker("integration"):
+            item.add_marker(pytest.mark.skip(reason="Set DUBVI_TEST_INTEGRATION=1 for network/model integration tests"))

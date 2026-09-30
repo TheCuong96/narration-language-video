@@ -184,6 +184,7 @@ def _process_chunk_early(
         provider_name=cfg.translate_provider,
         prefer_gpu=cfg.prefer_gpu,
         concurrency=cfg.translate_concurrency,
+                fallback_online=cfg.translate_fallback_online,
     )
     translate_sec = max(0.0, time.perf_counter() - translate_started)
     return plan, segments_en, segments_vi, transcribe_sec, translate_sec
@@ -286,7 +287,11 @@ def process_early_stages_chunked(
         raise EngineError(ErrorCode.TRANSCRIBE_FAILED, "Không nhận được đoạn lời nói nào")
 
     cache.save_segments(work / cache.TRANSCRIPT_EN, segments_en)
-    cache.save_segments(work / cache.TRANSCRIPT_VI, segments_vi)
+    fingerprint = translation.translation_fingerprint(
+        segments_en, source_lang=cfg.source_lang, target_lang=cfg.target_lang,
+        provider_name=cfg.translate_provider, terms=cfg.terms,
+        fallback_online=cfg.translate_fallback_online)
+    cache.save_translation_segments(work / cache.TRANSCRIPT_VI, segments_vi, fingerprint)
 
     if tracker:
         tracker.split_current_stage_timing(

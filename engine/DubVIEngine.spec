@@ -15,12 +15,20 @@ do not rely on system PATH in production.
 """
 
 from PyInstaller.utils.hooks import collect_all, collect_data_files
+from pathlib import Path
+import hashlib
+import json
 
 block_cipher = None
 
 datas = []
 binaries = []
 hiddenimports = [
+    "requests",
+    "urllib3",
+    "certifi",
+    "dubvi.providers.ollama",
+    "dubvi.providers.fallback",
     "edge_tts",
     "deep_translator",
     "faster_whisper",
@@ -41,7 +49,7 @@ hiddenimports = [
 ]
 
 # Collect heavier packages when available
-for pkg in ("edge_tts", "faster_whisper", "ctranslate2"):
+for pkg in ("requests", "urllib3", "certifi", "edge_tts", "faster_whisper", "ctranslate2"):
     try:
         d, b, h = collect_all(pkg)
         datas += d
@@ -77,6 +85,26 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
+
+# torch wheels can contain license trees deeper than Windows MAX_PATH, even
+# in a normal checkout. Preserve every notice at a short, unique destination
+# and ship an index mapping its original path to the bundled location.
+license_index = []
+short_datas = []
+for dest, source, kind in a.datas:
+    original = dest.replace("\\", "/")
+    if ".dist-info/licenses/" in original:
+        package = original.split(".dist-info/", 1)[0].split("/")[-1]
+        digest = hashlib.sha256(original.encode("utf-8")).hexdigest()[:16]
+        dest = f"third_party_licenses/{package}/{digest}_{Path(original).name}"
+        license_index.append({"original": original, "bundled": dest})
+    short_datas.append((dest, source, kind))
+if license_index:
+    index_path = Path("build") / "license-paths.json"
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path.write_text(json.dumps(license_index, indent=2), encoding="utf-8")
+    short_datas.append(("third_party_licenses/license-paths.json", str(index_path.resolve()), "DATA"))
+a.datas = short_datas
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 

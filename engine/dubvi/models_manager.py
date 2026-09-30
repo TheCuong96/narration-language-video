@@ -89,6 +89,19 @@ MODEL_CATALOG: list[dict[str, Any]] = [
 ]
 
 
+from . import ollama_manager
+
+for _model, _size in zip(ollama_manager.ALLOWED_MODELS, (3300, 8100, 17000)):
+    MODEL_CATALOG.append({
+        "id": _model, "kind": "translate", "provider": _model,
+        "label": "TranslateGemma " + _model.split(":")[1].upper(),
+        "size_mb": _size, "runtime": "ollama", "external_runtime": True,
+        "license_note": "Gemma Terms of Use", "model_url": "https://ollama.com/library/translategemma",
+        "recommended": _size == 3300, "speed": "Tùy RAM/VRAM",
+        "quality": "Dịch local", "recommended_for": "Ollama quản lý model trên máy",
+    })
+
+
 def models_dir() -> Path:
     d = appdata_root() / "models"
     d.mkdir(parents=True, exist_ok=True)
@@ -118,6 +131,11 @@ def _has_any(root: Path, names: tuple[str, ...]) -> bool:
 
 def is_model_downloaded(model_id: str) -> bool:
     """True only when required weight files exist (not just tokenizer/config)."""
+    if (catalog_entry(model_id) or {}).get("runtime") == "ollama":
+        try:
+            return ollama_manager.is_model_installed(model_id)
+        except EngineError:
+            return False
     p = model_path(model_id)
     if not p.exists():
         return False
@@ -143,6 +161,9 @@ def is_model_downloaded(model_id: str) -> bool:
 
 
 def model_disk_usage_bytes(model_id: str | None = None) -> int:
+    if model_id and (catalog_entry(model_id) or {}).get("runtime") == "ollama":
+        return sum(int(m.get("size", 0)) for m in ollama_manager.list_installed_models()
+                   if m.get("name", m.get("model")) == model_id)
     root = models_dir() if model_id is None else model_path(model_id)
     if not root.exists():
         return 0
@@ -161,8 +182,18 @@ def catalog_entry(model_id: str) -> dict[str, Any] | None:
 
 def list_models(*, kind: str | None = None) -> list[dict[str, Any]]:
     out = []
+    health = ollama_manager.check_health() if any(m.get("runtime") == "ollama" and (not kind or m.get("kind") == kind) for m in MODEL_CATALOG) else {}
     for m in MODEL_CATALOG:
         if kind and m.get("kind", "whisper") != kind:
+            continue
+        if m.get("runtime") == "ollama":
+            installed = next((item for item in health.get("models", [])
+                              if item.get("name", item.get("model")) == m["id"]), None)
+            used = int((installed or {}).get("size", 0))
+            out.append({**m, "downloaded": installed is not None,
+                        "local_bytes": used, "local_mb": round(used / (1024 * 1024), 1),
+                        "runtime_available": health.get("available", False),
+                        "runtime_error": health.get("error"), "download_root": ""})
             continue
         used = model_disk_usage_bytes(m["id"]) if is_model_downloaded(m["id"]) else 0
         out.append(
@@ -292,7 +323,7 @@ def download_model(
     model_id: str,
     *,
     progress_cb: ProgressCb | None = None,
-) -> Path:
+) -> Path | None:
     """
     Download model into LOCALAPPDATA/DubVI/models/<id>.
     Never silent: emits size estimate and progress events.
@@ -300,6 +331,10 @@ def download_model(
     meta = catalog_entry(model_id)
     if meta is None:
         raise EngineError(ErrorCode.INVALID_ARGS, f"Model không hợp lệ: {model_id}")
+
+    if meta.get("runtime") == "ollama":
+        ollama_manager.pull_model(model_id, progress_callback=progress_cb)
+        return None
 
     size_mb = int(meta["size_mb"])
     kind = meta.get("kind", "whisper")
@@ -408,6 +443,13 @@ def delete_model(model_id: str, *, confirm: bool = False) -> None:
             ErrorCode.INVALID_ARGS,
             "Cần xác nhận mới xóa model (confirm=true)",
         )
+    meta = catalog_entry(model_id)
+    if meta is None:
+        raise EngineError(ErrorCode.INVALID_ARGS, "Model không hợp lệ.")
+    if meta.get("runtime") == "ollama":
+        ollama_manager.delete_model(model_id)
+        events.system({"models": list_models()})
+        return
     p = model_path(model_id)
     if p.exists():
         shutil.rmtree(p, ignore_errors=True)

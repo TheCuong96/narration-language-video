@@ -31,3 +31,19 @@ Môi trường: **không** Python, FFmpeg, CUDA, Node, Rust.
 
 - [ ] README / CHANGELOG / privacy cập nhật version
 - [ ] completion-report ghi rõ phần đã/ chưa xác minh trên máy sạch
+
+
+## TranslateGemma
+
+- [ ] `node desktop/scripts/test-privacy-banner.mjs` thành công (sau npm ci trong desktop)
+- [ ] Frozen sidecar `models --kind translate` gọi tags và nhận dung lượng từ Ollama
+- [ ] requests/urllib3/certifi nằm trong onedir, không cần Python ngoài
+- [ ] Không có Ollama executable hoặc trọng số GGUF trong payload installer
+- [ ] Máy sạch, Ollama chưa mở: Settings/doctor hiển thị hướng dẫn; NLLB/Google vẫn dùng được
+- [ ] Cài/mở Ollama riêng, UI xác nhận dung lượng trước pull; progress và trạng thái Sẵn sàng
+- [ ] UI xóa từng model với xác nhận (không xóa model dùng thật để chỉ kiểm tra)
+- [ ] Video thực: TranslateGemma giữ id/timestamp/thứ tự; protected terms; review/resume/retry
+- [ ] Google → NLLB → 4B → 12B: cache dịch invalid, transcript EN vẫn giữ
+- [ ] Offline fallback mặc định không gửi Google; opt-in hiển thị cảnh báo privacy
+- [ ] NLLB/XTTS chạy thật trong cấu hình offline, không chỉ unit mocks
+- [ ] Gemma Terms of Use/model URL hiển thị, không tuyên bố Google bảo trợ

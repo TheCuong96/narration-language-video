@@ -45,6 +45,23 @@ def save_segments(path: Path, segments: list[Segment]) -> None:
     save_json(path, [s.to_dict() for s in segments])
 
 
+def translation_metadata_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".meta.json")
+
+
+def save_translation_segments(path: Path, segments: list[Segment], fingerprint: str) -> None:
+    """Fail closed if interrupted between the two atomic file replacements.
+
+    Keep the transcript array compatible with review and older readers. Remove
+    the previous stamp before changing translations so a crash cannot label
+    new provider output with the previous provider's fingerprint.
+    """
+    metadata_path = translation_metadata_path(path)
+    save_json(metadata_path, {})
+    save_segments(path, segments)
+    save_json(metadata_path, {"translation_fingerprint": fingerprint})
+
+
 def load_segments(path: Path) -> list[Segment] | None:
     raw = load_json(path)
     if raw is None:
@@ -54,7 +71,7 @@ def load_segments(path: Path) -> list[Segment] | None:
 
 def clear_downstream(work: Path, *, keep_en: bool = True) -> None:
     """Clear caches that depend on later stages (for --force)."""
-    for name in (TRANSCRIPT_VI, SCRIPT_VI, NARRATION, "concat.txt", *_LEGACY_NARRATION):
+    for name in (TRANSCRIPT_VI, TRANSCRIPT_VI + ".meta.json", SCRIPT_VI, NARRATION, "concat.txt", *_LEGACY_NARRATION):
         p = work / name
         if p.exists():
             p.unlink()

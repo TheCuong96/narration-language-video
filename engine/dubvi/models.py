@@ -184,6 +184,7 @@ class JobConfig:
     chunk_workers: int = 0  # 0 = auto
     tts_concurrency: int = 0  # 0 = adaptive (edge-tts); >0 = fixed workers
     tts_max_concurrency: int = 0  # 0 = auto cap (96); adaptive upper bound
+    translate_fallback_online: bool = False
     translate_concurrency: int = 0  # 0 = auto per provider
     # Skip Whisper + translation; use sidecar SRT/VTT (Udemy, yt-dlp, …).
     use_existing_subtitles: bool = False

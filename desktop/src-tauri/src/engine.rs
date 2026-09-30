@@ -34,6 +34,10 @@ pub struct JobOptions {
     #[serde(default)]
     pub xtts_speaker_wav: String,
     #[serde(default)]
+    pub translate_concurrency: u32,
+    #[serde(default)]
+    pub translate_fallback_online: bool,
+    #[serde(default)]
     pub tts_concurrency: u32,
     #[serde(default)]
     pub tts_max_concurrency: u32,
@@ -481,6 +485,12 @@ pub async fn start_job(
         args.push("--xtts-speaker".into());
         args.push(options.xtts_speaker_wav);
     }
+    if options.translate_concurrency > 32 {
+        return Err("Kích thước batch dịch phải từ 0 đến 32".into());
+    }
+    args.push("--translate-concurrency".into());
+    args.push(options.translate_concurrency.to_string());
+    args.push(if options.translate_fallback_online { "--translate-fallback-online" } else { "--no-translate-fallback-online" }.into());
     if options.tts_concurrency > 0 {
         args.push("--tts-concurrency".into());
         args.push(options.tts_concurrency.to_string());
@@ -551,6 +561,8 @@ fn default_settings_json() -> Value {
         "translate_provider": "deep-translator",
         "tts_provider": "edge-tts",
         "xtts_speaker_wav": "",
+        "translate_concurrency": 0,
+        "translate_fallback_online": false,
         "tts_concurrency": 0,
         "tts_max_concurrency": 0,
     })
@@ -828,6 +840,15 @@ pub fn run_engine_capture(args: &[&str]) -> Result<String, String> {
     let _ = cleanup_orphan_mei_dirs();
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     if !output.status.success() {
+        // Doctor deliberately exits nonzero for failed checks. Its JSON report
+        // still needs to reach Settings so users can see the repair guidance.
+        if args.first() == Some(&"doctor") {
+            if let Ok(report) = serde_json::from_str::<Value>(&stdout) {
+                if report.get("checks").and_then(Value::as_array).is_some() {
+                    return Ok(stdout);
+                }
+            }
+        }
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("engine failed: {stderr} {stdout}"));
     }

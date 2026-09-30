@@ -4,8 +4,38 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+import threading
+import time
 
 from .base import TtsProvider, TranslateProvider
+
+
+class GoogleRateLimiter:
+    def __init__(self, rate=4, *, clock=time.monotonic, sleep=time.sleep):
+        self.interval = 1.0 / rate
+        self.clock = clock
+        self.sleep = sleep
+        self.lock = threading.Lock()
+        self.next_request = 0.0
+
+    def acquire(self):
+        with self.lock:
+            delay = self.next_request - self.clock()
+            if delay > 0:
+                self.sleep(delay)
+            self.next_request = self.clock() + self.interval
+
+    def cooldown(self, seconds):
+        with self.lock:
+            self.next_request = max(self.next_request, self.clock() + seconds)
+
+
+def is_rate_limit(error):
+    return any(term in str(error).lower() for term in
+               ("too many requests", "429", "rate limit", "wait and try again later"))
+
+
+GOOGLE_LIMITER = GoogleRateLimiter()
 
 
 class GoogleDeepTranslator(TranslateProvider):
@@ -30,47 +60,48 @@ class GoogleDeepTranslator(TranslateProvider):
         )
         return not any(p in low for p in poison)
 
+    supports_batch = True
+    handles_batch_errors = True
+
     def translate(self, text: str, *, source: str, target: str) -> str:
-        from deep_translator import GoogleTranslator, MyMemoryTranslator
+        from deep_translator import GoogleTranslator
+        from ..models import ErrorCode
+        from ..system_info import EngineError
 
+        if not text.strip():
+            return text
         src = "auto" if source in ("", "auto") else source
-        errors: list[Exception] = []
-
-        candidates: list[tuple[str, Callable[[], str | None]]] = [
-            (f"google:{src}", lambda: GoogleTranslator(source=src, target=target).translate(text)),
-        ]
-        if src != "auto":
-            candidates.append(
-                (
-                    "google:auto",
-                    lambda: GoogleTranslator(source="auto", target=target).translate(text),
-                )
-            )
-
-        # MyMemory uses locale-style codes; keep as last resort (length limits).
-        if len(text) <= 450:
-            mm_src = "en-GB" if src in ("en", "auto", "") else src
-            mm_tgt = "vi-VN" if target.lower() in ("vi", "vi-vn") else target
-            candidates.append(
-                (
-                    "mymemory",
-                    lambda: MyMemoryTranslator(source=mm_src, target=mm_tgt).translate(text),
-                )
-            )
-
-        for _label, fn in candidates:
+        # All Google requests, including retries, share one process-wide gate.
+        for attempt in range(5):
+            GOOGLE_LIMITER.acquire()
             try:
-                result = fn()
+                result = GoogleTranslator(source=src, target=target).translate(text)
                 if self._usable(result):
                     return str(result)
-                errors.append(RuntimeError(f"unusable translation: {result!r}"[:200]))
-            except Exception as e:  # noqa: BLE001 — try next backend
-                errors.append(e)
-                continue
+                raise RuntimeError("unusable translation")
+            except Exception as exc:
+                if is_rate_limit(exc) and attempt < 4:
+                    GOOGLE_LIMITER.cooldown(2 ** (attempt + 1))
+                    continue
+                raise EngineError(ErrorCode.TRANSLATE_FAILED,
+                                  "Google giới hạn request; hãy thử lại sau hoặc chọn dịch local."
+                                  if is_rate_limit(exc) else "Google không trả được bản dịch hợp lệ.") from exc
+        raise EngineError(ErrorCode.TRANSLATE_FAILED, "Google dịch thất bại.")
 
-        if errors:
-            raise errors[0]
-        return text
+    def translate_batch(self, texts: list[str], *, source: str, target: str) -> list[str]:
+        # deep-translator.translate_batch itself loops translate(); using that
+        # implementation would bypass our limiter and replay successful items.
+        # Commit each success exactly once through the guarded translate method.
+        from .. import events
+        from ..system_info import EngineError
+        out = []
+        for index, text in enumerate(texts):
+            try:
+                out.append(self.translate(text, source=source, target=target))
+            except EngineError:
+                events.warning("GOOGLE_SEGMENT_FAILED", f"Google không dịch được đoạn trong batch {index + 1}; giữ văn bản gốc.")
+                out.append(text)
+        return out
 
 
 class EdgeTtsProvider(TtsProvider):

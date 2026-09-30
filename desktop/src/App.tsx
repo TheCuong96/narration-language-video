@@ -98,6 +98,8 @@ const defaultSettings: AppSettings = {
   translate_provider: "deep-translator",
   tts_provider: "edge-tts",
   xtts_speaker_wav: "",
+  translate_concurrency: 0,
+  translate_fallback_online: false,
   tts_concurrency: 0,
   tts_max_concurrency: 0,
 };
@@ -1290,6 +1292,8 @@ export default function App() {
           translateProvider: settings.translate_provider || "deep-translator",
           ttsProvider: settings.tts_provider || "edge-tts",
           xttsSpeakerWav: settings.xtts_speaker_wav || "",
+          translateConcurrency: settings.translate_concurrency ?? 0,
+          translateFallbackOnline: settings.translate_fallback_online ?? false,
           ttsConcurrency: settings.tts_concurrency ?? 0,
           ttsMaxConcurrency: settings.tts_max_concurrency ?? 0,
         },

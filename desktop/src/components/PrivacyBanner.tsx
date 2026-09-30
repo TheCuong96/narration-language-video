@@ -7,7 +7,7 @@ interface Props {
 export function PrivacyBanner({ settings }: Props) {
   const translate = settings?.translate_provider || "deep-translator";
   const tts = settings?.tts_provider || "edge-tts";
-  const offlineTranslate = ["nllb", "nllb-offline", "offline-translate"].includes(
+  const offlineTranslate = translate.startsWith("translategemma") || ["nllb", "nllb-offline", "offline-translate"].includes(
     translate,
   );
   const offlineTts = ["xtts-v2", "xtts", "vixtts", "offline-tts"].includes(tts);
@@ -28,6 +28,7 @@ export function PrivacyBanner({ settings }: Props) {
           )}
           .
         </li>
+        {offlineTranslate && settings?.translate_fallback_online ? <li>Fallback Google được bật: transcript có thể gửi ra Internet khi dịch local lỗi.</li> : null}
         <li>
           Tạo giọng đọc:{" "}
           {offlineTts ? <em>offline trên máy</em> : <em>cần Internet</em>}.
@@ -35,7 +36,7 @@ export function PrivacyBanner({ settings }: Props) {
         <li>
           Video <em>không</em> được upload lên server của Dub VI.
         </li>
-        {!offlineTranslate || !offlineTts ? (
+        {!offlineTranslate || !offlineTts || settings?.translate_fallback_online ? (
           <li>Chỉ bản dịch/text được gửi tới dịch vụ online đang chọn.</li>
         ) : (
           <li>

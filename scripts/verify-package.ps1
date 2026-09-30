@@ -38,5 +38,27 @@ Check (-not (Test-Path (Join-Path $Root "release\.env"))) "No secrets in release
 $base = Get-Content (Join-Path $Root "engine\requirements-base.txt") -Raw
 Check ($base -notmatch "nvidia-") "requirements-base.txt has no nvidia packages"
 
+$sidecarRoot = Join-Path $Root "desktop\src-tauri\resources\engine"
+$sidecarExe = Join-Path $sidecarRoot "DubVIEngine.exe"
+Check (Test-Path $sidecarExe) "Onedir sidecar exists"
+Check (Test-Path (Join-Path $sidecarRoot "_internal\certifi\cacert.pem")) "certifi CA data bundled"
+if (Test-Path $sidecarExe) {
+    try {
+        # This imports requests/urllib3 in the frozen process and calls /api/tags
+        # without requiring an external Python installation or a downloaded model.
+        $modelJson = & $sidecarExe models --kind translate
+        Check ($LASTEXITCODE -eq 0) "Frozen sidecar models command succeeds"
+        $modelCatalog = ($modelJson -join "`n") | ConvertFrom-Json
+        $gemma = @($modelCatalog | Where-Object { $_.runtime -eq 'ollama' })
+        Check ($gemma.Count -eq 3) "Frozen catalog has three Ollama models"
+        Check (@($gemma | Where-Object { $_.download_root }).Count -eq 0) "Ollama models have no Dub VI model path"
+    } catch {
+        Check $false "Frozen model catalog smoke failed: $_"
+    }
+    $bundledWeights = @(Get-ChildItem -LiteralPath $sidecarRoot -Recurse -File -Filter '*.gguf')
+    Check ($bundledWeights.Count -eq 0) "No Ollama GGUF weights bundled"
+    Check (-not (Test-Path (Join-Path $sidecarRoot 'ollama.exe'))) "Ollama runtime not bundled"
+}
+
 if ($ok) { Write-Host "`nVERIFY PASSED" -ForegroundColor Green; exit 0 }
 Write-Host "`nVERIFY FAILED" -ForegroundColor Red; exit 1

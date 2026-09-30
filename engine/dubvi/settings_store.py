@@ -39,6 +39,7 @@ class AppSettings:
     tts_concurrency: int = 0
     # 0 = auto cap 96 for adaptive mode.
     tts_max_concurrency: int = 0
+    translate_fallback_online: bool = False
     translate_concurrency: int = 0
     # Never store API keys in plaintext logs; reserved for future
     # api_keys stored only if user opts in later versions

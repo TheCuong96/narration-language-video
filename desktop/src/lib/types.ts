@@ -103,6 +103,8 @@ export interface JobOptions {
   translateProvider: string;
   ttsProvider: string;
   xttsSpeakerWav?: string;
+  translateConcurrency?: number;
+  translateFallbackOnline?: boolean;
   ttsConcurrency?: number;
   ttsMaxConcurrency?: number;
 }
@@ -121,6 +123,11 @@ export interface WhisperModelInfo {
   kind?: "whisper" | "translate" | "tts" | string;
   provider?: string;
   license_note?: string;
+  runtime?: string;
+  external_runtime?: boolean;
+  runtime_available?: boolean;
+  runtime_error?: string;
+  model_url?: string;
 }
 
 export interface XttsSpeakerOption {
@@ -149,6 +156,8 @@ export interface AppSettings {
   tts_provider: string;
   xtts_speaker_wav?: string;
   /** 0 = adaptive by network; >0 = fixed parallel TTS requests. */
+  translate_concurrency?: number;
+  translate_fallback_online?: boolean;
   tts_concurrency?: number;
   /** 0 = auto cap 96 when adaptive. */
   tts_max_concurrency?: number;

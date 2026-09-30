@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### TranslateGemma / reliability
+
+- Provider TranslateGemma 4B/12B/27B qua Ollama localhost, quản lý tags/pull/delete và tiến độ NDJSON trong Settings.
+- Batch marker validation/splitting, allowlist loopback, doctor và privacy local; không bundle runtime/model.
+- Truyền translate_concurrency và opt-in fallback online qua React/Rust/CLI/settings/job resume.
+- Cache fingerprint theo provider/model/ngôn ngữ/prompt/terms/source text; giữ transcript EN khi đổi provider và làm mới cache giọng đọc.
+- Google limiter chung tối đa 4 requests/s, cooldown 2/4/8/16s, batch tuần tự không gửi lại segment thành công.
+- Unit HTTP mock, cache/fallback/rate-limit tests, PrivacyBanner render test; integration phải bật biến môi trường.
+
+
 ### Performance
 
 - Dịch offline NLLB xử lý theo lô (batch) thay vì từng câu một → nhanh hơn nhiều lần trên cả CPU/GPU; GPU dùng fp16, CPU giảm beam search xuống 1 (greedy) để ưu tiên tốc độ

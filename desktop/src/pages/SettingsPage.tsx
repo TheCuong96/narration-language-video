@@ -5,6 +5,7 @@ import type {
   WhisperModelInfo,
   XttsSpeakerOption,
 } from "../lib/types";
+import { openOllamaDownload } from "../lib/engine";
 import { PrivacyBanner } from "../components/PrivacyBanner";
 
 type SaveSection = "general" | "providers";
@@ -79,12 +80,13 @@ function ModelList({
                 ~{m.size_mb} MB · {m.speed} · {m.quality}
               </div>
               <div className="q-meta">{m.recommended_for}</div>
+              {m.runtime_error ? <div role="status" className="q-meta">{m.runtime_error}</div> : null}
               {m.license_note ? (
                 <div className="q-meta">License: {m.license_note}</div>
               ) : null}
               <div className="q-meta">
                 {m.downloaded
-                  ? `Đã tải (${m.local_mb} MB trên đĩa)`
+                  ? `Sẵn sàng (${m.local_mb} MB trên đĩa)`
                   : "Chưa tải"}
               </div>
             </div>
@@ -93,7 +95,7 @@ function ModelList({
                 <button
                   type="button"
                   className="primary"
-                  disabled={!!downloading}
+                  disabled={!!downloading || m.runtime_available === false}
                   onClick={() => {
                     if (
                       window.confirm(
@@ -110,7 +112,7 @@ function ModelList({
                 <button
                   type="button"
                   className="danger"
-                  disabled={!!downloading}
+                  disabled={!!downloading || m.runtime_available === false}
                   onClick={() => {
                     if (
                       window.confirm(
@@ -192,9 +194,11 @@ export function SettingsPage({
   }
 
   const whisperModels = models.filter((m) => (m.kind || "whisper") === "whisper");
-  const translateModels = models.filter((m) => m.kind === "translate");
+  const translateModels = models.filter((m) => m.kind === "translate" && m.runtime !== "ollama");
+  const ollamaModels = models.filter((m) => m.runtime === "ollama");
+  const selectedOllama = ollamaModels.find((m) => m.provider === settings.translate_provider);
   const ttsModels = models.filter((m) => m.kind === "tts");
-  const offlineTranslate = settings.translate_provider === "nllb";
+  const offlineTranslate = settings.translate_provider === "nllb" || settings.translate_provider.startsWith("translategemma");
   const offlineTts = settings.tts_provider === "xtts-v2";
 
   const selectedSpeaker = settings.xtts_speaker_wav || "";
@@ -335,11 +339,9 @@ export function SettingsPage({
       <section className="panel">
         <h2>Nhà cung cấp dịch &amp; giọng đọc</h2>
         <p className="muted">
-          Online (mặc định) không cần model lớn. Offline cần{" "}
-          <code>pip uninstall -y TTS coqpit</code> rồi{" "}
-          <code>pip install -r engine/requirements-offline.txt</code> và tải model bên
-          dưới. Giọng đọc offline nên bật <strong>Auto GPU</strong>. License model
-          offline: Coqui CPML (không thương mại).
+          Google cần Internet. TranslateGemma cần cài/mở Ollama và tải model bên dưới.
+          NLLB/XTTS cần dependency từ engine/requirements-offline.txt khi chạy dev.
+          Giọng đọc XTTS dùng Coqui CPML; TranslateGemma dùng Gemma Terms of Use.
         </p>
         <div className="row">
           <label>Dịch thuật</label>
@@ -350,9 +352,25 @@ export function SettingsPage({
             }
           >
             <option value="deep-translator">Google — online (cần Internet)</option>
-            <option value="nllb">Offline trên máy (NLLB)</option>
+            <option value="nllb">NLLB-200 — offline trong app</option>
+            <option value="translategemma:4b">TranslateGemma 4B — Ollama local, khuyến nghị</option>
+            <option value="translategemma:12b">TranslateGemma 12B — Ollama local, máy mạnh</option>
+            <option value="translategemma:27b">TranslateGemma 27B — Ollama local, máy rất mạnh</option>
           </select>
         </div>
+        <div className="row">
+          <label>Kích thước batch dịch</label>
+          <input type="number" min={0} max={32} step={1} value={settings.translate_concurrency ?? 0}
+            onChange={(e) => onChange({ ...settings, translate_concurrency: Math.max(0, Math.min(32, parseInt(e.target.value, 10) || 0)) })} />
+        </div>
+        <p className="muted">0 = tự động; 1–32 = số subtitle trong một batch, không phải số request Ollama song song.</p>
+        {offlineTranslate ? <label><input type="checkbox" checked={settings.translate_fallback_online ?? false}
+          onChange={(e) => onChange({ ...settings, translate_fallback_online: e.target.checked })} /> Cho phép fallback Google (gửi transcript ra Internet khi dịch local lỗi)</label> : null}
+        {settings.translate_provider.startsWith("translategemma") ? <div role="status">
+          <p>{!selectedOllama ? "Chưa có trạng thái Ollama; bấm Làm mới danh sách." : !selectedOllama.runtime_available ? selectedOllama.runtime_error : selectedOllama.downloaded ? "Ollama — Sẵn sàng" : "Ollama đang chạy — model chưa tải"}</p>
+          <button type="button" onClick={() => void openOllamaDownload().catch((e) => window.alert(String(e)))}>Mở trang tải Ollama chính thức</button>
+          <button type="button" onClick={onRefreshModels}>Kiểm tra Ollama</button>
+        </div> : null}
         <div className="row">
           <label>Cách tạo giọng đọc</label>
           <select
@@ -506,7 +524,7 @@ export function SettingsPage({
       </section>
 
       <section className="panel">
-        <h2>Model offline — dịch thuật &amp; tạo giọng đọc</h2>
+        <h2>Model local — Dub VI và Ollama quản lý</h2>
         <p className="muted">
           ~2–4 GB mỗi model. Cần Internet lúc tải; sau đó chạy trên máy. Model tạo
           giọng đọc khá nặng — nên có GPU NVIDIA.
@@ -516,7 +534,7 @@ export function SettingsPage({
             Làm mới danh sách
           </button>
         </div>
-        <h3>Dịch thuật (NLLB)</h3>
+        <h3>Dub VI quản lý: NLLB (Whisper ở trên, XTTS ở dưới)</h3>
         <ModelList
           models={translateModels}
           downloading={downloading}
@@ -524,6 +542,9 @@ export function SettingsPage({
           onDownload={onDownload}
           onDelete={onDelete}
         />
+        <h3>Ollama quản lý: TranslateGemma</h3>
+        <p className="muted">Model lưu trong kho Ollama; không nằm trong installer hoặc thư mục model Dub VI. 4B ~3,3 GB · 12B ~8,1 GB · 27B ~17 GB.</p>
+        <ModelList models={ollamaModels} downloading={downloading} downloadPct={downloadPct} onDownload={onDownload} onDelete={onDelete} />
         <h3>Tạo giọng đọc (XTTS)</h3>
         <ModelList
           models={ttsModels}

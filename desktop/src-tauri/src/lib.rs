@@ -88,6 +88,12 @@ async fn list_xtts_speakers() -> Result<Value, String> {
 }
 
 #[tauri::command]
+async fn open_ollama_download(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().open_url("https://ollama.com/download", None::<&str>).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn open_folder(app: AppHandle, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     app.opener()
@@ -308,6 +314,7 @@ pub fn run() {
             pick_download_dir,
             pick_speaker_wav,
             open_folder,
+            open_ollama_download,
             probe_videos,
             cut_segment,
             probe_url,

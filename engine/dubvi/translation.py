@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
 import re
 import threading
 import time
@@ -20,10 +22,37 @@ log = get_logger("dubvi.translation")
 def default_translate_concurrency(provider_name: str, *, prefer_gpu: bool = False) -> int:
     """Pick safe default parallelism (threads) or batch size (local models)."""
     name = (provider_name or "deep-translator").lower()
-    if name.startswith("nllb") or "offline" in name:
+    if name.startswith(("nllb", "translategemma")) or "offline" in name:
         # Batched model.generate() call, not threads — GPU handles bigger batches.
         return 16 if prefer_gpu else 8
-    return min(4, max(2, (os.cpu_count() or 4) // 2))
+    return 12  # Google: sequential guarded requests within small batches
+
+
+TRANSLATION_VERSION = "translation-v3"
+
+
+def translation_fingerprint(segments, *, source_lang, target_lang, provider_name, terms,
+                            fallback_online=False):
+    from .providers.ollama import PROMPT_VERSION
+    name = (provider_name or "deep-translator").strip().lower()
+    if name == "translategemma":
+        name = "translategemma:4b"
+    payload = {"source": source_lang, "target": target_lang, "provider": name,
+               "model": name if name.startswith("translategemma") else
+                        "nllb-200-distilled-600M" if name.startswith("nllb") else name,
+               "prompt": PROMPT_VERSION if name.startswith("translategemma") else TRANSLATION_VERSION,
+               "terms": terms, "source_text": [s.text_en for s in segments],
+               "segments": [(s.id, float(s.start), float(s.end)) for s in segments],
+               "fallback_online": fallback_online}
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+def cache_matches(path, segments, **kwargs):
+    try:
+        metadata = cache.load_json(cache.translation_metadata_path(path)) or {}
+        return metadata.get("translation_fingerprint") == translation_fingerprint(segments, **kwargs)
+    except (ValueError, TypeError):
+        return False
 
 
 def protect_terms(text: str, terms: list[str]) -> tuple[str, dict[str, str]]:
@@ -146,10 +175,15 @@ def _translate_batch_with_backoff(
     """
     if not texts:
         return []
+    if getattr(provider, "handles_batch_errors", False):
+        return provider.translate_batch(texts, source=source, target=target)
     last_err: Exception | None = None
     for attempt in range(max_attempts):
         try:
-            return provider.translate_batch(texts, source=source, target=target)
+            outputs = provider.translate_batch(texts, source=source, target=target)
+            if len(outputs) != len(texts) or any(not str(o).strip() for o in outputs):
+                raise ValueError("invalid batch output")
+            return outputs
         except EngineError:
             raise
         except Exception as e:
@@ -237,8 +271,23 @@ def translate_segments(
     provider_name: str = "deep-translator",
     prefer_gpu: bool = False,
     concurrency: int = 0,
+    fallback_online: bool = False,
 ) -> list[Segment]:
+    fingerprint_args = dict(source_lang=source_lang, target_lang=target_lang,
+                            provider_name=provider_name, terms=terms, fallback_online=fallback_online)
+    fingerprint = translation_fingerprint(segments, **fingerprint_args)
     cached = cache.load_segments(out_path)
+    if not cache_matches(out_path, segments, **fingerprint_args):
+        if cached:
+            events.log("Cache bản dịch không khớp provider/model; tiến hành dịch lại")
+            cache.clear_downstream(out_path.parent, keep_en=True)
+        cached = None
+    if cached:
+        valid = {s.id: s for s in segments}
+        cached = [s for s in cached if s.id in valid and s.text_en == valid[s.id].text_en]
+
+    def save_translation(items):
+        cache.save_translation_segments(out_path, items, fingerprint)
     if cached is not None and len(cached) == len(segments) and all(s.text_vi for s in cached):
         events.log(f"Dùng cache bản dịch: {out_path.name}")
         if tracker:
@@ -253,13 +302,16 @@ def translate_segments(
 
     src = "auto" if source_lang in ("", "auto") else source_lang
     translator = get_translate_provider(provider_name, prefer_gpu=prefer_gpu)
+    if not translator.requires_internet:
+        from .providers.fallback import LocalFallbackProvider
+        translator = LocalFallbackProvider(translator, prefer_gpu=prefer_gpu, online=fallback_online)
     workers = concurrency if concurrency > 0 else default_translate_concurrency(
         provider_name, prefer_gpu=prefer_gpu
     )
-    workers = max(1, min(workers, max(len(segments), 1)))
+    workers = max(1, min(workers, 32, max(len(segments), 1)))
     # Local models (NLLB) translate a whole batch in one model call instead of
     # one thread per segment — much faster than either serial or thread-pool.
-    use_batch = getattr(translator, "supports_batch", False) and not translator.requires_internet
+    use_batch = getattr(translator, "supports_batch", False)
     mode_label = f"lô {workers} đoạn" if use_batch else f"{workers} luồng"
 
     if tracker:
@@ -276,7 +328,8 @@ def translate_segments(
         )
     events.log(translator.privacy_note())
     if use_batch:
-        events.log(f"Dịch theo lô: {workers} đoạn/lượt (model chạy trên máy)")
+        runtime_note = "model chạy trên máy" if not translator.requires_internet else "Google tuần tự, giới hạn request"
+        events.log(f"Dịch theo lô: {workers} đoạn/lượt ({runtime_note})")
     elif workers > 1:
         events.log(f"Dịch song song: {workers} đoạn cùng lúc")
 
@@ -313,7 +366,7 @@ def translate_segments(
                 filled.append(by_id[s.id])
             else:
                 filled.append(s)
-        cache.save_segments(out_path, filled)
+        save_translation(filled)
 
     if pending and use_batch:
         for start in range(0, len(pending), workers):
@@ -358,7 +411,7 @@ def translate_segments(
         throttle = 0.0
         if workers == 1 and translator.requires_internet:
             # Single-thread online path keeps a light throttle for stability.
-            throttle = 0.05
+            throttle = 0.25
         for i, s in enumerate(segments):
             if cancel:
                 cancel.check()
@@ -379,5 +432,5 @@ def translate_segments(
             _maybe_save_partial()
 
     result = [translated[s.id] for s in segments]
-    cache.save_segments(out_path, result)
+    save_translation(result)
     return result
