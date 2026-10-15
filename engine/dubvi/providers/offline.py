@@ -156,9 +156,11 @@ def _ensure_xtts_deps() -> None:
                 ErrorCode.TTS_FAILED,
                 f"XTTS deps lỗi: {e}. Sửa bằng: {hint}",
             ) from e
+        # Keep the real ImportError: in the frozen app it is usually a bundling
+        # gap (missing metadata/data file), not a missing pip package.
         raise EngineError(
             ErrorCode.TTS_FAILED,
-            _offline_deps_hint("coqui-tts[codec] / torch") + f" — {hint}",
+            _offline_deps_hint("coqui-tts[codec] / torch") + f" ({type(e).__name__}: {e}) — {hint}",
         ) from e
 
 

@@ -1,6 +1,7 @@
 # Dub VI engine — CPU baseline (required for v0.1)
 faster-whisper>=1.1.0
-edge-tts>=6.1.0
+# >=7.3.1: Microsoft moved Sec-MS-GEC-Version to "2-…"; 7.2.x gets HTTP 403.
+edge-tts>=7.3.1
 deep-translator>=1.11.4
 requests>=2.32.0
 yt-dlp[default]>=2024.8.0

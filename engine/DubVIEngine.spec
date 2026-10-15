@@ -63,6 +63,33 @@ try:
 except Exception:
     pass
 
+# Offline XTTS (coqui-tts) — PyInstaller's import scan alone misses what it
+# needs at runtime:
+#  - torchcodec: coqui raises ImportError on torch>=2.9 without it, and
+#    transformers reads its dist-info (importlib.metadata) → needs collect_all.
+#  - TTS: configs/__init__.py does os.listdir() on its own folder.
+#  - inflect: typeguard @typechecked calls inspect.getsource().
+#  - gruut*/ko_speech_tools: language data files read at import time.
+for pkg in (
+    "TTS",
+    "torchcodec",
+    "inflect",
+    "gruut",
+    "gruut_ipa",
+    "gruut_lang_en",
+    "gruut_lang_de",
+    "gruut_lang_es",
+    "gruut_lang_fr",
+    "ko_speech_tools",
+):
+    try:
+        d, b, h = collect_all(pkg)
+        datas += d
+        binaries += b
+        hiddenimports += h
+    except Exception:
+        pass
+
 a = Analysis(
     # Top-level entry with absolute imports — do NOT use dubvi/__main__.py
     # (relative imports break when PyInstaller runs it as a bare script).
@@ -77,9 +104,15 @@ a = Analysis(
     excludes=[
         "nvidia",
         "tensorboard",
-        "matplotlib",
+        # NOT matplotlib: coqui-tts imports it at module level (vocoder utils).
         "tkinter",
     ],
+    # Keep .py next to the bytecode for packages that read their own source
+    # files at runtime (os.listdir / inspect.getsource).
+    module_collection_mode={
+        "TTS": "pyz+py",
+        "inflect": "pyz+py",
+    },
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
