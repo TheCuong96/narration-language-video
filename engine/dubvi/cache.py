@@ -23,6 +23,8 @@ NARRATION = "narration_sentence_v2.wav"
 SEGMENTS_DIR = "segments_sentence_v2"
 FITTED_DIR = "fitted_sentence_v2"
 CHUNKS_DIR = "chunks"
+# Source re-stamped at constant fps when its video PTS were stretched vs audio.
+RETIMED_SOURCE = "source_retimed.mp4"
 _LEGACY_NARRATION = ("narration_1x.wav", "narration_slot.wav", "narration.wav")
 _LEGACY_SEGMENTS = ("segments",)
 _LEGACY_FITTED = ("fitted_1x", "fitted_slot", "fitted_soft", "fitted")
@@ -98,7 +100,7 @@ def cleanup_temps_after_success(work: Path, *, keep_transcripts: bool = True) ->
     After successful mux: remove bulky temps, keep transcripts for re-run insight.
     On failure the caller must NOT call this.
     """
-    for name in (AUDIO_FLAC, NARRATION, "concat.txt", *_LEGACY_NARRATION):
+    for name in (AUDIO_FLAC, NARRATION, RETIMED_SOURCE, "concat.txt", *_LEGACY_NARRATION):
         p = work / name
         if p.exists():
             try:

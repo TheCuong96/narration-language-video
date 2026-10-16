@@ -11,8 +11,11 @@ from .ffmpeg import (
     make_silence,
     mux_video,
     pad_or_trim_audio,
+    probe_av_timing,
     probe_duration,
+    retime_video_cfr,
     stretch_to_duration,
+    stretched_video_fps,
 )
 from .jobs import CancellationToken
 from .models import AudioMode, Segment, Stage
@@ -26,6 +29,51 @@ MIN_TEMPO = 1.0
 # Legacy spill-mode ceiling. Strict sentence fitting is uncapped so content is
 # never discarded; FFmpeg stacks atempo filters for ratios above 2×.
 MAX_TEMPO = 8.0
+
+
+def media_source(video: Path, work: Path) -> Path:
+    """The file to time/mux against: the retimed copy if one was made, else the input."""
+    retimed = work / cache.RETIMED_SOURCE
+    if retimed.exists() and retimed.stat().st_size > 0:
+        return retimed
+    return video
+
+
+def normalize_source(video: Path, work: Path, tracker=None) -> Path:
+    """
+    Retime sources whose video timestamps are stretched relative to the audio.
+
+    Without this the narration (timed to the speech) ends at ~2/3 of the video
+    and the rest of the output is silent, with slides out of sync.
+    """
+    current = media_source(video, work)
+    if current != video:
+        events.log("Dùng cache video đã sửa timeline")
+        return current
+    timing = probe_av_timing(video)
+    fps = stretched_video_fps(timing) if timing else None
+    if not fps:
+        return video
+
+    events.log(
+        f"Video nguồn lệch tiếng: hình {timing.video_sec:.1f}s nhưng tiếng {timing.audio_sec:.1f}s "
+        f"({timing.frames} khung @ {fps:g}fps) — đang sửa timeline video"
+    )
+
+    def _on_progress(frac: float) -> None:
+        if tracker:
+            pct = int(round(frac * 100))
+            tracker.emit(pct, 100, f"Sửa timeline video… {pct}%", force_frac=frac)
+
+    retimed = work / cache.RETIMED_SOURCE
+    retime_video_cfr(
+        video,
+        retimed,
+        fps,
+        duration_sec=timing.audio_sec,
+        on_progress=_on_progress,
+    )
+    return retimed
 
 
 def extract_for_whisper(video: Path, work: Path, tracker=None) -> Path:

@@ -155,7 +155,11 @@ def process_one(
     cancel.check()
 
     ensure_disk_space(video, work, cfg.output_dir)
-    duration = probe_duration(video)
+    # Names/queue keep the original path; timing, extract and mux use the
+    # (possibly retimed) media file.
+    media = audio.normalize_source(video, work, tracker=tracker)
+    cancel.check()
+    duration = probe_duration(media)
     events.log(f"Độ dài: {duration / 60:.1f} phút")
     tracker.emit(1, 1, f"Độ dài {duration / 60:.1f} phút")
 
@@ -191,7 +195,7 @@ def process_one(
             flac = work / cache.AUDIO_FLAC
             if flac.exists():
                 flac.unlink()
-        flac = audio.extract_for_whisper(video, work, tracker=tracker)
+        flac = audio.extract_for_whisper(media, work, tracker=tracker)
     else:
         flac = work / cache.AUDIO_FLAC
         tracker.begin_stage(Stage.EXTRACTING, "Dùng cache âm thanh")
@@ -427,7 +431,7 @@ def _finish_from_tts(
 
     cancel.check()
     audio.mux(
-        video,
+        audio.media_source(video, work),
         narration,
         output,
         audio_mode=cfg.audio_mode,
@@ -498,7 +502,7 @@ def continue_stem(cfg: JobConfig, stem: str) -> int:
     cfg.review_translation = False
     cfg.translate_only = False
     try:
-        duration = probe_duration(video)
+        duration = probe_duration(audio.media_source(video, work))
         output = Path(item["output"])
         queue.update_item(jid, stem, status=QueueItemStatus.RUNNING)
         qitems = list(q.get("items") or []) if q else []

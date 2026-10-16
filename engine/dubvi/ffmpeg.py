@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from .models import ErrorCode
@@ -262,6 +263,119 @@ def probe_duration(path: Path) -> float:
         return float(out) if out else 0.0
     except ValueError:
         return 0.0
+
+
+@dataclass(frozen=True)
+class AvTiming:
+    """Stream lengths of the first video/audio streams (seconds)."""
+
+    video_sec: float
+    audio_sec: float
+    frames: int
+    fps: float  # nominal r_frame_rate
+
+
+def _parse_rate(rate: str) -> float:
+    num, _, den = (rate or "").partition("/")
+    try:
+        n, d = float(num), float(den or 1)
+    except ValueError:
+        return 0.0
+    return n / d if d else 0.0
+
+
+def _stream_seconds(stream: dict) -> float:
+    try:
+        return float(stream.get("duration") or 0.0)
+    except ValueError:
+        return 0.0
+
+
+def probe_av_timing(path: Path) -> AvTiming | None:
+    """Return first video+audio stream timing, or None if either is missing."""
+    import json
+
+    out = subprocess.check_output(
+        [
+            ffprobe_path(),
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type,duration,nb_frames,r_frame_rate",
+            "-of",
+            "json",
+            str(path),
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        shell=False,
+    )
+    streams = json.loads(out or "{}").get("streams") or []
+    v = next((s for s in streams if s.get("codec_type") == "video"), None)
+    a = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    if not v or not a:
+        return None
+    try:
+        frames = int(v.get("nb_frames") or 0)
+    except ValueError:
+        frames = 0
+    return AvTiming(
+        video_sec=_stream_seconds(v),
+        audio_sec=_stream_seconds(a),
+        frames=frames,
+        fps=_parse_rate(str(v.get("r_frame_rate") or "")),
+    )
+
+
+def stretched_video_fps(t: AvTiming) -> float | None:
+    """
+    Detect a source whose video PTS are stretched relative to its audio.
+
+    Signature of the broken downloads seen in practice: frames / nominal fps
+    equals the audio length, while the video stream's timestamps run ~1.5x
+    longer — the dub then follows the (shorter) speech and goes silent at the
+    end. Returns the fps to retime frames at, or None if the file looks sane.
+    """
+    # TODO(human)
+
+
+def retime_video_cfr(
+    src: Path,
+    dst: Path,
+    fps: float,
+    *,
+    duration_sec: float = 0.0,
+    on_progress: Callable[[float], None] | None = None,
+) -> None:
+    """Re-stamp every frame at a constant ``fps`` (frame N at N/fps), audio copied."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(dst.stem + ".partial" + dst.suffix)
+    run_ffmpeg_with_progress(
+        [
+            ffmpeg_path(),
+            "-y",
+            "-i",
+            str(src),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0",
+            "-vf",
+            f"setpts=N/({fps:.6f}*TB)",
+            "-r",
+            f"{fps:.6f}",
+            *_video_stream_args("", reencode=True),
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(tmp),
+        ],
+        duration_sec=duration_sec,
+        on_progress=on_progress,
+    )
+    os.replace(tmp, dst)
 
 
 def extract_video_segment(
