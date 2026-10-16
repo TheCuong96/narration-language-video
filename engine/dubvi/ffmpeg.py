@@ -257,9 +257,11 @@ def probe_duration(path: Path) -> float:
         errors="replace",
         shell=False,
     ).strip()
-    if not out:
+    # ffprobe prints "N/A" for empty/headerless media (e.g. a chunk past the audio end).
+    try:
+        return float(out) if out else 0.0
+    except ValueError:
         return 0.0
-    return float(out)
 
 
 def extract_video_segment(

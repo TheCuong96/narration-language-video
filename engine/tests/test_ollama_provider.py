@@ -39,6 +39,8 @@ def test_chat(http):
     assert payload["stream"] is False
     assert payload["options"]["temperature"] == 0
     assert payload["keep_alive"] == "30m"
+    assert payload["options"]["num_ctx"] == 16384
+    assert 0 < payload["options"]["num_predict"] < 16384
     prompt = payload["messages"][0]["content"]
     assert "English (en) to Vietnamese (vi)" in prompt
     assert prompt.endswith(":\n\n\nHello")
@@ -87,6 +89,12 @@ def test_invalid_json(http):
 def test_empty_content(http, data):
     http[1].json.return_value = data
     with pytest.raises(EngineError, match="rỗng"):
+        TranslateGemmaProvider().translate("Hello", source="en", target="vi")
+
+
+def test_runaway_output_rejected(http):
+    http[1].json.return_value = {"done_reason": "length", "message": {"content": "lặp lặp lặp"}}
+    with pytest.raises(EngineError, match="quá dài"):
         TranslateGemmaProvider().translate("Hello", source="en", target="vi")
 
 

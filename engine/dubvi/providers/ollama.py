@@ -54,11 +54,23 @@ class TranslateGemmaProvider(TranslateProvider):
     handles_batch_errors = True
 
     def __init__(self, model="translategemma:4b", base_url=manager.BASE_URL,
-                 connect_timeout=4, read_timeout=300, keep_alive="30m"):
+                 connect_timeout=4, read_timeout=300, keep_alive="30m", num_ctx=16384):
         self.model = self.name = manager.normalize_model(model)
         self.base_url = manager.normalize_base_url(base_url)
         self.timeout = (connect_timeout, read_timeout)
         self.keep_alive = keep_alive
+        # Pin the context: the Ollama tray app's global slider (e.g. 128K after reboot)
+        # otherwise lets a looping greedy decode run far past read_timeout.
+        self.num_ctx = num_ctx
+
+    def _output_budget(self, prompt: str) -> int:
+        """Max tokens Ollama may generate for this prompt (num_predict)."""
+        # ~3 chars/token is conservative for Latin scripts; CJK input only overestimates.
+        prompt_tokens = len(prompt) // 3 + 1
+        # Vietnamese output runs ~1.3-1.5x the source tokens; 2x leaves headroom.
+        wanted = max(256, prompt_tokens * 2)
+        room = self.num_ctx - prompt_tokens - 256
+        return max(256, min(wanted, room))
 
     def privacy_note(self) -> str:
         return "TranslateGemma dịch qua localhost; transcript không rời máy. Chỉ lần tải model cần Internet."
@@ -73,7 +85,12 @@ class TranslateGemmaProvider(TranslateProvider):
                               f"Model {self.model} chưa tải. Vào Settings → Tải model Ollama.")
         data = manager.json_response(manager.request("POST", "/api/chat", base_url=self.base_url,
             timeout=self.timeout, json={"model": self.model, "messages": [{"role": "user", "content": prompt}],
-                "stream": False, "keep_alive": self.keep_alive, "options": {"temperature": 0}}))
+                "stream": False, "keep_alive": self.keep_alive,
+                "options": {"temperature": 0, "num_ctx": self.num_ctx,
+                            "num_predict": self._output_budget(prompt)}}))
+        if data.get("done_reason") == "length":
+            raise EngineError(ErrorCode.TRANSLATE_FAILED,
+                              "TranslateGemma sinh quá dài (có thể lặp); chia nhỏ để dịch lại.")
         message = data.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str) or not clean_output(content):

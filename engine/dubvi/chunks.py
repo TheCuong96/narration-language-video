@@ -206,6 +206,11 @@ def process_early_stages_chunked(
     Whisper calls are serialized via whisper_lock inside transcribe().
     """
     silence = detect_silence_midpoints(full_flac)
+    # The audio track often ends before the video; planning on the video length
+    # creates a trailing chunk with no samples.
+    audio_dur = probe_duration(full_flac)
+    if audio_dur > 0:
+        duration = min(duration, audio_dur)
     plans = plan_chunks(
         duration,
         target_chunk_sec=cfg.chunk_duration_sec,
