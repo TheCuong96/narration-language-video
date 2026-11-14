@@ -21,7 +21,7 @@ New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 $zip = Join-Path $tmp "ffmpeg.zip"
 
 Write-Host "Downloading FFmpeg essentials..."
-Invoke-WebRequest -Uri $zipUrl -OutFile $zip
+Invoke-WebRequest -Uri $zipUrl -OutFile $zip -TimeoutSec 120
 Expand-Archive -Path $zip -DestinationPath $tmp -Force
 
 $bin = Get-ChildItem -Path $tmp -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
@@ -29,5 +29,11 @@ if (-not $bin) { throw "ffmpeg.exe not found in archive" }
 $probe = Join-Path $bin.DirectoryName "ffprobe.exe"
 Copy-Item -Force $bin.FullName $ffmpeg
 Copy-Item -Force $probe $ffprobe
-Remove-Item -Recurse -Force $tmp
+$resolvedTemp = [IO.Path]::GetFullPath($tmp)
+$tempRoot = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\') + '\'
+if (-not $resolvedTemp.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or
+    (Split-Path -Leaf $resolvedTemp) -notlike 'dubvi-ffmpeg-*') {
+    throw "Unsafe temporary cleanup target: $resolvedTemp"
+}
+Remove-Item -LiteralPath $resolvedTemp -Recurse -Force
 Write-Host "[OK] Installed to $OutDir"

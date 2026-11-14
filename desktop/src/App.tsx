@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
 import { ErrorDialog } from "./components/ErrorDialog";
 import {
+  attachEngineListener,
   cancelJob,
   continueAfterReview,
   deleteModel,
@@ -9,25 +10,37 @@ import {
   cutSegment,
   downloadUrl,
   filterVideoFiles,
+  getEngineStatus,
   getQueue,
   getSettings,
   listModels,
   listXttsSpeakers,
   openFolder,
   pickDownloadDir,
+  pickInputFolder,
   pickOutputDir,
   pickSpeakerWav,
   pickVideos,
+  expandAndMatchMedia,
   probeVideos,
   resumeJob,
   retryFailed,
   reviewGet,
   reviewSet,
   saveSettings,
+  enqueueVideos,
   startJob,
   urlHelp as fetchUrlHelp,
+  isLikelyFolderPath,
+  isSubtitlePath,
+  isVideoPath,
+  splitMediaPaths,
   type UrlHelpInfo,
 } from "./lib/engine";
+import {
+  computeOverallPercentFromFractions,
+  computeOverallPercentFromStage,
+} from "./lib/progressEta";
 import type {
   AppSettings,
   AudioMode,
@@ -79,10 +92,38 @@ const defaultSettings: AppSettings = {
   voice: "vi-VN-HoaiMyNeural",
   audio_mode: "vi_only",
   review_by_default: false,
+  force_rerun: false,
+  source_lang: "en",
+  use_existing_subtitles: false,
   translate_provider: "deep-translator",
   tts_provider: "edge-tts",
   xtts_speaker_wav: "",
+  translate_concurrency: 0,
+  translate_fallback_online: false,
+  tts_concurrency: 0,
+  tts_max_concurrency: 0,
 };
+
+const LS_OUTPUT_DIR = "dubvi.default_output_dir";
+const LS_DOWNLOAD_DIR = "dubvi.default_download_dir";
+
+function readLocalDir(key: string): string {
+  try {
+    return localStorage.getItem(key) || "";
+  } catch {
+    return "";
+  }
+}
+
+function writeLocalDir(key: string, dir: string) {
+  try {
+    const trimmed = dir.trim();
+    if (trimmed) localStorage.setItem(key, trimmed);
+    else localStorage.removeItem(key);
+  } catch {
+    /* private mode / unavailable */
+  }
+}
 
 function friendlyLine(ev: EngineEvent): { text: string; cls?: string } {
   switch (ev.type) {
@@ -111,7 +152,7 @@ export default function App() {
   const [page, setPage] = useState<Page>("dub");
   const [files, setFiles] = useState<string[]>([]);
   const [queue, setQueue] = useState<QueueItem[]>([]);
-  const [outputDir, setOutputDir] = useState("");
+  const [outputDir, setOutputDir] = useState(() => readLocalDir(LS_OUTPUT_DIR));
   const [voice, setVoice] = useState(defaultSettings.voice);
   const [model, setModel] = useState(defaultSettings.whisper_model);
   const [audioMode, setAudioMode] = useState<AudioMode>("vi_only");
@@ -119,6 +160,8 @@ export default function App() {
   const [review, setReview] = useState(false);
   const [force, setForce] = useState(false);
   const [preferGpu, setPreferGpu] = useState(false);
+  const [useExistingSubtitles, setUseExistingSubtitles] = useState(false);
+  const [subtitleFiles, setSubtitleFiles] = useState<string[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [busy, setBusy] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
@@ -138,6 +181,8 @@ export default function App() {
     fileTotal: 0,
     fileName: "",
   });
+  const [stageDurationsSec, setStageDurationsSec] = useState<Record<string, number>>({});
+  const [stageFractions, setStageFractions] = useState<Record<string, number>>({});
   /** Wall-clock seconds for each completed file in the current job. */
   const [completedElapsedSec, setCompletedElapsedSec] = useState<number[]>([]);
   const [reviewStem, setReviewStem] = useState<string | null>(null);
@@ -145,14 +190,18 @@ export default function App() {
   const [errOpen, setErrOpen] = useState(false);
   const [errFriendly, setErrFriendly] = useState<FriendlyError | null>(null);
   const [errTech, setErrTech] = useState("");
-  const [settings, setSettings] = useState<AppSettings>(defaultSettings);
+  const [settings, setSettings] = useState<AppSettings>(() => ({
+    ...defaultSettings,
+    default_output_dir: readLocalDir(LS_OUTPUT_DIR),
+    default_download_dir: readLocalDir(LS_DOWNLOAD_DIR),
+  }));
   const [models, setModels] = useState<WhisperModelInfo[]>([]);
   const [xttsSpeakers, setXttsSpeakers] = useState<XttsSpeakerOption[]>([]);
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [downloadPct, setDownloadPct] = useState(0);
   const [urlInput, setUrlInput] = useState("");
-  const [downloadDir, setDownloadDir] = useState("");
+  const [downloadDir, setDownloadDir] = useState(() => readLocalDir(LS_DOWNLOAD_DIR));
   const [urlHelp, setUrlHelp] = useState<UrlHelpInfo | null>(null);
   const [downloadingUrl, setDownloadingUrl] = useState(false);
   const [lastUrlDownload, setLastUrlDownload] = useState<UrlDownloadNotice | null>(
@@ -168,6 +217,28 @@ export default function App() {
   const urlDownloadedPathsRef = useRef<Set<string>>(new Set());
   /** Debounce writing remembered dirs into settings.json. */
   const dirPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Debounce writing numeric dub prefs (mix dB slider). */
+  const dubPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Latest settings snapshot for flush-on-unmount. */
+  const settingsRef = useRef<AppSettings>(settings);
+  settingsRef.current = settings;
+  /** Avoid saving defaults over disk before getSettings finishes. */
+  const settingsHydratedRef = useRef(false);
+  /** User changed a dir before hydrate — don't let disk clobber that pick. */
+  const dirsTouchedRef = useRef({ output: false, download: false });
+  const busyRef = useRef(false);
+  const jobIdRef = useRef<string | null>(null);
+  /** Highest total shown for this job; progress may advance but never retreat. */
+  const overallFloorRef = useRef(0);
+  /** Latest live queue size, including videos appended while a file is running. */
+  const queueTotalRef = useRef(0);
+  /** Reset per-stage measurements exactly when the engine moves to another file. */
+  const timingFileRef = useRef("");
+  /** Files dropped while startJob is in-flight (busy but jobId not ready yet). */
+  const pendingEnqueueRef = useRef<string[]>([]);
+  const onEngineEventRef = useRef<(ev: EngineEvent) => void>(() => {});
+  busyRef.current = busy;
+  jobIdRef.current = jobId;
 
   const refreshXttsSpeakers = useCallback(async () => {
     try {
@@ -207,8 +278,14 @@ export default function App() {
   const rememberDir = useCallback(
     (kind: "output" | "download", dir: string, opts?: { immediate?: boolean }) => {
       const trimmed = dir.trim();
-      if (kind === "output") setOutputDir(dir);
-      else setDownloadDir(dir);
+      dirsTouchedRef.current[kind] = true;
+      if (kind === "output") {
+        setOutputDir(dir);
+        writeLocalDir(LS_OUTPUT_DIR, trimmed);
+      } else {
+        setDownloadDir(dir);
+        writeLocalDir(LS_DOWNLOAD_DIR, trimmed);
+      }
 
       setSettings((prev) => {
         const next: AppSettings = {
@@ -217,12 +294,15 @@ export default function App() {
             ? { default_output_dir: trimmed }
             : { default_download_dir: trimmed }),
         };
+        settingsRef.current = next;
+        // Don't overwrite settings.json with defaults before initial load finishes.
+        if (!settingsHydratedRef.current) return next;
         if (dirPersistTimerRef.current) {
           clearTimeout(dirPersistTimerRef.current);
           dirPersistTimerRef.current = null;
         }
         const persist = () => {
-          void saveSettings(next).catch((e) => {
+          void saveSettings(settingsRef.current).catch((e) => {
             pushLog({
               text: `Không lưu đường dẫn thư mục: ${e}`,
               cls: "warn",
@@ -239,10 +319,44 @@ export default function App() {
     [pushLog],
   );
 
+  /** Persist Dub-page choices immediately (voice, GPU, source lang, …). */
+  const patchSettings = useCallback(
+    (patch: Partial<AppSettings>, opts?: { debounceMs?: number }) => {
+      setSettings((prev) => {
+        const next: AppSettings = { ...prev, ...patch };
+        settingsRef.current = next;
+        if (!settingsHydratedRef.current) return next;
+        const persist = () => {
+          void saveSettings(next).catch((e) => {
+            pushLog({
+              text: `Không lưu cài đặt: ${e}`,
+              cls: "warn",
+            });
+          });
+        };
+        if (opts?.debounceMs) {
+          if (dubPersistTimerRef.current) {
+            clearTimeout(dubPersistTimerRef.current);
+          }
+          dubPersistTimerRef.current = setTimeout(persist, opts.debounceMs);
+        } else {
+          if (dubPersistTimerRef.current) {
+            clearTimeout(dubPersistTimerRef.current);
+            dubPersistTimerRef.current = null;
+          }
+          persist();
+        }
+        return next;
+      });
+    },
+    [pushLog],
+  );
+
   const onEngineEvent = useCallback(
     (ev: EngineEvent) => {
       pushLog(friendlyLine(ev));
       if (ev.type === "queue_updated" && ev.queue?.items) {
+        queueTotalRef.current = ev.queue.items.length;
         setQueue((prev) => {
           const meta = new Map(prev.map((p) => [p.stem, p]));
           return ev.queue!.items.map((it) => {
@@ -284,8 +398,10 @@ export default function App() {
             stageLabel: (ev.stage_label as string) || "Tải video",
             stage: ev.stage || "downloading_video",
           });
+          const monotonicPct = Math.max(overallFloorRef.current, stagePct);
+          overallFloorRef.current = monotonicPct;
           setOverallProgress({
-            percent: stagePct,
+            percent: monotonicPct,
             fileIndex: 1,
             fileTotal: 1,
             fileName: "",
@@ -300,10 +416,55 @@ export default function App() {
               : ev.total
                 ? Math.round((100 * (ev.current || 0)) / ev.total)
                 : 0;
-          const overallPct =
-            typeof ev.overall_percent === "number"
+          const rawDurations = ev.stage_durations_sec || {};
+          const rawFractions = ev.stage_fracs || {};
+          const latestFileTotal = Math.max(
+            1,
+            Number(ev.file_total) || 0,
+            queueTotalRef.current,
+          );
+          const reportedOverallPct =
+            Object.keys(rawFractions).length > 0
+              ? computeOverallPercentFromFractions(
+                  rawFractions,
+                  Number(ev.file_index) || 1,
+                  latestFileTotal,
+                )
+              : typeof ev.overall_percent === "number"
               ? ev.overall_percent
-              : stagePct;
+              : computeOverallPercentFromStage(
+                  String(ev.stage || ""),
+                  stagePct,
+                  (ev.file_index as number) || 1,
+                  latestFileTotal,
+                );
+          const overallPct = Math.max(
+            overallFloorRef.current,
+            Math.max(0, Math.min(100, reportedOverallPct)),
+          );
+          overallFloorRef.current = overallPct;
+
+          const timingKey = `${Number(ev.file_index) || 0}:${String(ev.file || "")}`;
+          if (timingKey !== timingFileRef.current) {
+            timingFileRef.current = timingKey;
+            setStageDurationsSec({ ...rawDurations });
+            setStageFractions({ ...rawFractions });
+          } else {
+            setStageDurationsSec((previous) => {
+              const next = { ...previous };
+              for (const [key, value] of Object.entries(rawDurations)) {
+                if (Number.isFinite(value)) next[key] = Math.max(next[key] || 0, value);
+              }
+              return next;
+            });
+            setStageFractions((previous) => {
+              const next = { ...previous };
+              for (const [key, value] of Object.entries(rawFractions)) {
+                if (Number.isFinite(value)) next[key] = Math.max(next[key] || 0, value);
+              }
+              return next;
+            });
+          }
           setFileProgress({
             current: ev.current || 0,
             total: ev.total || 0,
@@ -315,7 +476,7 @@ export default function App() {
           setOverallProgress({
             percent: overallPct,
             fileIndex: (ev.file_index as number) || 0,
-            fileTotal: (ev.file_total as number) || 0,
+            fileTotal: latestFileTotal,
             fileName: (ev.file as string) || "",
           });
           if (ev.message || ev.stage_label) {
@@ -341,10 +502,39 @@ export default function App() {
         }
       }
       if (ev.type === "completed") {
+        overallFloorRef.current = 100;
         setOverallProgress((p) => ({ ...p, percent: 100 }));
         setFileProgress((p) => ({ ...p, percent: 100, message: "Hoàn tất" }));
         setStageLabel("Hoàn tất");
         setCanResume(false);
+        // Mid-run appends that landed after the engine decided to finish.
+        const finishedId = jobIdRef.current;
+        if (finishedId) {
+          window.setTimeout(() => {
+            void (async () => {
+              if (busyRef.current || jobIdRef.current !== finishedId) return;
+              try {
+                const q = await getQueue(finishedId);
+                const hasPending = (q.items || []).some(
+                  (i) => i.status === "pending",
+                );
+                if (!hasPending) return;
+                pushLog({
+                  text: "Còn video chờ trong hàng đợi — tự tiếp tục xử lý…",
+                });
+                setBusy(true);
+                sawTerminalRef.current = false;
+                userStoppedRef.current = false;
+                setCanResume(false);
+                setStageLabel("Đang tiếp tục hàng đợi vừa thêm…");
+                await resumeJob(finishedId, (e) => onEngineEventRef.current(e));
+              } catch (e) {
+                setBusy(false);
+                pushLog({ text: String(e), cls: "warn" });
+              }
+            })();
+          }, 400);
+        }
       }
       if (ev.type === "review_ready" && ev.stem && ev.segments) {
         setReviewStem(ev.stem);
@@ -401,23 +591,131 @@ export default function App() {
     },
     [pushLog, downloading],
   );
+  onEngineEventRef.current = onEngineEvent;
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       try {
         const s = await getSettings();
-        setSettings({ ...defaultSettings, ...s });
-        setModel(s.whisper_model);
-        setVoice(s.voice);
-        setAudioMode(s.audio_mode);
-        setMixDb(s.mix_original_db);
-        setReview(s.review_by_default);
-        setPreferGpu(s.device_mode === "auto");
-        if (s.default_output_dir) setOutputDir(s.default_output_dir);
-        if (s.default_download_dir) setDownloadDir(s.default_download_dir);
-      } catch {
-        /* browser preview */
+        if (cancelled) return;
+        const merged: AppSettings = { ...defaultSettings, ...s };
+        setModel(merged.whisper_model);
+        setVoice(merged.voice);
+        setAudioMode(merged.audio_mode);
+        setMixDb(merged.mix_original_db);
+        setReview(merged.review_by_default);
+        setForce(merged.force_rerun ?? false);
+        setUseExistingSubtitles(merged.use_existing_subtitles ?? false);
+        setPreferGpu(merged.device_mode === "auto");
+
+        const diskOut = (merged.default_output_dir || "").trim();
+        const diskDl = (merged.default_download_dir || "").trim();
+        const localOut = readLocalDir(LS_OUTPUT_DIR);
+        const localDl = readLocalDir(LS_DOWNLOAD_DIR);
+        let heal: Partial<AppSettings> | null = null;
+
+        // Prefer: user pick during load → disk → localStorage backup.
+        if (dirsTouchedRef.current.output) {
+          const keep = localOut;
+          merged.default_output_dir = keep;
+          heal = { ...(heal || {}), default_output_dir: keep };
+        } else if (diskOut) {
+          setOutputDir(diskOut);
+          writeLocalDir(LS_OUTPUT_DIR, diskOut);
+          merged.default_output_dir = diskOut;
+        } else if (localOut) {
+          setOutputDir(localOut);
+          merged.default_output_dir = localOut;
+          heal = { ...(heal || {}), default_output_dir: localOut };
+        } else {
+          setOutputDir("");
+          merged.default_output_dir = "";
+        }
+
+        if (dirsTouchedRef.current.download) {
+          const keep = localDl;
+          merged.default_download_dir = keep;
+          heal = { ...(heal || {}), default_download_dir: keep };
+        } else if (diskDl) {
+          setDownloadDir(diskDl);
+          writeLocalDir(LS_DOWNLOAD_DIR, diskDl);
+          merged.default_download_dir = diskDl;
+        } else if (localDl) {
+          setDownloadDir(localDl);
+          merged.default_download_dir = localDl;
+          heal = { ...(heal || {}), default_download_dir: localDl };
+        } else {
+          setDownloadDir("");
+          writeLocalDir(LS_DOWNLOAD_DIR, "");
+          merged.default_download_dir = "";
+        }
+
+        setSettings(merged);
+        settingsRef.current = merged;
+        if (heal) {
+          void saveSettings(merged).catch(() => {
+            /* best-effort heal */
+          });
+        }
+      } catch (e) {
+        if (!cancelled) {
+          pushLog({
+            text: `Không tải được cài đặt đã lưu: ${e}`,
+            cls: "warn",
+          });
+        }
+      } finally {
+        if (!cancelled) settingsHydratedRef.current = true;
       }
+      if (cancelled) return;
+
+      // F5 only reloads the WebView — Rust may still be running a job. Reattach UI.
+      try {
+        const status = await getEngineStatus();
+        if (cancelled) return;
+        if (status.running && status.jobId) {
+          setJobId(status.jobId);
+          jobIdRef.current = status.jobId;
+          setBusy(true);
+          setStageLabel("Đang xử lý (khôi phục sau refresh)…");
+          setCanResume(false);
+          await attachEngineListener(onEngineEventRef.current);
+          try {
+            const q = await getQueue(status.jobId);
+            if (!cancelled && q?.items?.length) {
+              queueTotalRef.current = q.items.length;
+              setQueue(
+                q.items.map((it) => ({
+                  ...it,
+                  from_url: urlDownloadedPathsRef.current.has(it.input),
+                })),
+              );
+              setFiles(q.items.map((it) => it.input));
+              setOverallProgress((p) => ({
+                ...p,
+                fileTotal: q.items.length,
+              }));
+            }
+          } catch {
+            /* queue may be mid-write */
+          }
+          pushLog({
+            text: `Đã khôi phục job ${status.jobId} sau refresh (engine vẫn chạy)`,
+          });
+        } else if (status.peerEngineCount > 0) {
+          // Multi-window is supported; only flag leftovers when this window has no live job.
+          pushLog({
+            text:
+              `Phát hiện ${status.peerEngineCount} DubVIEngine còn sót (không thuộc job đang chạy). ` +
+              `Mở nhiều cửa sổ vẫn OK — chỉ End Task các engine thừa nếu GPU đầy / TTS chậm bất thường.`,
+            cls: "warn",
+          });
+        }
+      } catch {
+        /* not in Tauri / older build */
+      }
+
       try {
         setModels(await listModels());
       } catch {
@@ -434,58 +732,186 @@ export default function App() {
         /* browser preview / engine missing */
       }
     })();
-  }, []);
-
-  useEffect(() => {
-    let un: (() => void) | undefined;
-    (async () => {
-      try {
-        if (!("__TAURI_INTERNALS__" in window)) return;
-        const { getCurrentWebview } = await import("@tauri-apps/api/webview");
-        un = await getCurrentWebview().onDragDropEvent((event) => {
-          if (event.payload.type === "over") setDragOver(true);
-          else if (event.payload.type === "leave") setDragOver(false);
-          else if (event.payload.type === "drop") {
-            setDragOver(false);
-            const paths = (event.payload.paths || []).filter((p) =>
-              /\.(mp4|mkv|mov|avi|webm)$/i.test(p),
-            );
-            if (paths.length) void addFiles(paths);
-          }
-        });
-      } catch {
-        /* ignore */
+    return () => {
+      cancelled = true;
+      if (dirPersistTimerRef.current) {
+        clearTimeout(dirPersistTimerRef.current);
+        dirPersistTimerRef.current = null;
+        // Flush last typed path so closing within the debounce window still persists.
+        if (settingsHydratedRef.current) {
+          void saveSettings(settingsRef.current).catch(() => {
+            /* app closing */
+          });
+        }
       }
-    })();
-    return () => un?.();
-  }, []);
+      if (dubPersistTimerRef.current) {
+        clearTimeout(dubPersistTimerRef.current);
+        dubPersistTimerRef.current = null;
+        if (settingsHydratedRef.current) {
+          void saveSettings(settingsRef.current).catch(() => {
+            /* app closing */
+          });
+        }
+      }
+    };
+  }, [pushLog]);
 
   async function addFiles(paths: string[], opts?: { fromUrl?: boolean }) {
-    const merged = Array.from(new Set([...files, ...paths]));
-    setFiles(merged);
+    if (!paths.length) return null;
     if (opts?.fromUrl) {
       for (const p of paths) urlDownloadedPathsRef.current.add(p);
     }
-    const nextSource = cloneSource || paths[0] || "";
-    if (!cloneSource && paths[0]) {
-      setCloneSource(paths[0]);
+
+    let videos: string[] = [];
+    let subtitles: string[] = [];
+    let matched = 0;
+    try {
+      const scan = await expandAndMatchMedia(paths);
+      videos = scan.videos;
+      subtitles = scan.subtitles;
+      matched = scan.matches.length;
+    } catch {
+      const split = splitMediaPaths(paths);
+      videos = split.videos;
+      subtitles = split.subtitles;
     }
+
+    if (subtitles.length || matched) {
+      if (subtitles.length) {
+        setSubtitleFiles((prev) => Array.from(new Set([...prev, ...subtitles])));
+      }
+      if (matched > 0) {
+        pushLog({
+          text: `Đã thấy ${matched}/${videos.length || matched} video có file *_vi.srt. Giữ Tự dịch, hoặc chọn «Dùng phụ đề SRT» để đọc file (video không có SRT vẫn tự dịch).`,
+        });
+      } else if (subtitles.length) {
+        pushLog({
+          text: `Đã gắn ${subtitles.length} file phụ đề. Giữ Tự dịch, hoặc chọn «Dùng phụ đề SRT» nếu muốn đọc file.`,
+        });
+      }
+    }
+    if (!videos.length) {
+      if (!subtitles.length) {
+        pushLog({
+          text: "Không có video hoặc phụ đề *_vi.srt trong lựa chọn",
+          cls: "warn",
+        });
+      }
+      return null;
+    }
+
+    const fresh = videos.filter((p) => !files.includes(p));
+    const merged = Array.from(new Set([...files, ...videos]));
+    setFiles(merged);
+
+    const nextSource = cloneSource || videos[0] || "";
+    if (!cloneSource && videos[0]) {
+      setCloneSource(videos[0]);
+    }
+
+    // Busy but startJob has not returned jobId yet — buffer for flush after start.
+    if (busyRef.current && !jobIdRef.current && fresh.length) {
+      pendingEnqueueRef.current = Array.from(
+        new Set([...pendingEnqueueRef.current, ...fresh]),
+      );
+      pushLog({
+        text: `Đã xếp ${fresh.length} video — sẽ thêm vào hàng đợi ngay khi job sẵn sàng`,
+      });
+    }
+
+    // While a dub job is running: append to engine queue (auto-process next).
+    const liveJobId = busyRef.current ? jobIdRef.current : null;
+    if (liveJobId && fresh.length) {
+      try {
+        const result = await enqueueVideos(liveJobId, fresh);
+        const added = result.added?.length ? result.added : fresh;
+        pushLog({
+          text:
+            added.length > 0
+              ? `Đã thêm ${added.length} video vào hàng đợi — sẽ chạy tự động sau video hiện tại`
+              : "Video đã có trong hàng đợi",
+        });
+        if (result.queue?.items?.length) {
+          queueTotalRef.current = result.queue.items.length;
+          const probedNew = await probeVideos(added).catch(() => null);
+          const probeMap = new Map(
+            (probedNew || []).map((p) => [p.path, p] as const),
+          );
+          setQueue((prev) => {
+            const meta = new Map(prev.map((p) => [p.stem, p]));
+            return result.queue!.items.map((it) => {
+              const prevItem = meta.get(it.stem);
+              const probe = probeMap.get(it.input);
+              return {
+                ...it,
+                duration_label:
+                  prevItem?.duration_label || probe?.duration_label,
+                size_label: prevItem?.size_label || probe?.size_label,
+                duration_sec: prevItem?.duration_sec ?? probe?.duration_sec,
+                size_bytes: prevItem?.size_bytes ?? probe?.size_bytes,
+                from_url:
+                  Boolean(prevItem?.from_url) ||
+                  urlDownloadedPathsRef.current.has(it.input),
+              };
+            });
+          });
+          setOverallProgress((p) => ({
+            ...p,
+            fileTotal: result.queue!.items.length,
+          }));
+        }
+        // Race: job finished between click and enqueue — resume pending items.
+        const maybeResume = async () => {
+          if (busyRef.current || !added.length) return;
+          pushLog({ text: "Job vừa xong — tự tiếp tục hàng đợi mới thêm…" });
+          setBusy(true);
+          sawTerminalRef.current = false;
+          userStoppedRef.current = false;
+          setCanResume(false);
+          try {
+            await resumeJob(liveJobId, (e) => onEngineEventRef.current(e));
+          } catch (e) {
+            setBusy(false);
+            pushLog({ text: String(e), cls: "error" });
+          }
+        };
+        await maybeResume();
+        // Also re-check shortly after — covers "still busy during enqueue, then exits".
+        if (added.length) {
+          window.setTimeout(() => {
+            void maybeResume();
+          }, 600);
+        }
+        return null;
+      } catch (e) {
+        pushLog({ text: String(e), cls: "error" });
+        // Fall through to local queue update so UI still shows the files.
+      }
+    }
+
     try {
       const probed = await probeVideos(merged);
-      setQueue(
-        probed.map((p, i) => ({
-          index: i,
-          input: p.path,
-          output: "",
-          stem: p.stem,
-          status: "pending",
-          duration_label: p.duration_label,
-          size_label: p.size_label,
-          duration_sec: p.duration_sec,
-          size_bytes: p.size_bytes,
-          from_url: urlDownloadedPathsRef.current.has(p.path),
-        })),
-      );
+      setQueue((prev) => {
+        // Preserve live statuses when merging into an idle/local queue view.
+        const prevByInput = new Map(prev.map((p) => [p.input, p]));
+        return probed.map((p, i) => {
+          const old = prevByInput.get(p.path);
+          return {
+            index: i,
+            input: p.path,
+            output: old?.output || "",
+            stem: p.stem,
+            status: old?.status || "pending",
+            error: old?.error,
+            code: old?.code,
+            duration_label: p.duration_label,
+            size_label: p.size_label,
+            duration_sec: p.duration_sec,
+            size_bytes: p.size_bytes,
+            from_url: urlDownloadedPathsRef.current.has(p.path),
+          };
+        });
+      });
       let endForSuggest = cloneEnd.trim();
       if (!endForSuggest) {
         const srcPath = nextSource;
@@ -500,25 +926,69 @@ export default function App() {
       }
       return probed;
     } catch {
-      setQueue(
-        merged.map((f, i) => ({
-          index: i,
-          input: f,
-          output: "",
-          stem: f.replace(/^.*[\\/]/, "").replace(/\.[^.]+$/, ""),
-          status: "pending",
-          from_url: urlDownloadedPathsRef.current.has(f),
-        })),
-      );
+      setQueue((prev) => {
+        const prevByInput = new Map(prev.map((p) => [p.input, p]));
+        return merged.map((f, i) => {
+          const old = prevByInput.get(f);
+          return {
+            index: i,
+            input: f,
+            output: old?.output || "",
+            stem:
+              old?.stem ||
+              f.replace(/^.*[\\/]/, "").replace(/\.[^.]+$/, ""),
+            status: old?.status || "pending",
+            from_url: urlDownloadedPathsRef.current.has(f),
+          };
+        });
+      });
       return null;
     }
   }
 
+  const addFilesRef = useRef(addFiles);
+  addFilesRef.current = addFiles;
+
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    (async () => {
+      try {
+        if (!("__TAURI_INTERNALS__" in window)) return;
+        const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+        un = await getCurrentWebview().onDragDropEvent((event) => {
+          if (event.payload.type === "over") setDragOver(true);
+          else if (event.payload.type === "leave") setDragOver(false);
+          else if (event.payload.type === "drop") {
+            setDragOver(false);
+            if (downloadingUrl) return;
+            const paths = (event.payload.paths || []).filter(
+              (p) => isVideoPath(p) || isSubtitlePath(p) || isLikelyFolderPath(p),
+            );
+            if (paths.length) void addFilesRef.current(paths);
+          }
+        });
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => un?.();
+  }, [downloadingUrl]);
+
   async function onPickFiles() {
-    if (busy || downloadingUrl) return;
+    if (downloadingUrl) return;
     try {
       const picked = await pickVideos();
       if (picked?.length) await addFiles(picked);
+    } catch (e) {
+      pushLog({ text: String(e), cls: "warn" });
+    }
+  }
+
+  async function onPickFolder() {
+    if (downloadingUrl) return;
+    try {
+      const dir = await pickInputFolder();
+      if (dir) await addFiles([dir]);
     } catch (e) {
       pushLog({ text: String(e), cls: "warn" });
     }
@@ -531,6 +1001,11 @@ export default function App() {
     sawTerminalRef.current = false;
     userStoppedRef.current = false;
     setCanResume(false);
+    overallFloorRef.current = 0;
+    queueTotalRef.current = 1;
+    timingFileRef.current = "";
+    setStageDurationsSec({});
+    setStageFractions({});
     setStageLabel("Đang tải video từ URL…");
     setFileProgress({
       current: 0,
@@ -716,7 +1191,7 @@ export default function App() {
   function onBrowserDrop(e: DragEvent) {
     e.preventDefault();
     setDragOver(false);
-    if (busy || downloadingUrl) return;
+    if (downloadingUrl) return;
     const list = filterVideoFiles(e.dataTransfer.files);
     if (!list.length) return;
     pushLog({
@@ -735,11 +1210,55 @@ export default function App() {
       setErrOpen(true);
       return;
     }
+    // After F5, preferGpu defaults false until settings hydrate — wait so we don't pass --cpu.
+    if (!settingsHydratedRef.current) {
+      try {
+        const s = await getSettings();
+        const merged: AppSettings = { ...defaultSettings, ...s };
+        setSettings(merged);
+        settingsRef.current = merged;
+        setPreferGpu(merged.device_mode === "auto");
+        setModel(merged.whisper_model);
+        setVoice(merged.voice);
+        setForce(merged.force_rerun ?? false);
+        setUseExistingSubtitles(merged.use_existing_subtitles ?? false);
+        settingsHydratedRef.current = true;
+      } catch (e) {
+        setErrFriendly({
+          title: "Chưa sẵn sàng",
+          body: "Đang tải cài đặt. Thử Bắt đầu lại sau giây lát.",
+        });
+        setErrTech(String(e));
+        setErrOpen(true);
+        return;
+      }
+    }
+    const useGpu = settingsRef.current.device_mode === "auto";
+    const sourceLang = settingsRef.current.source_lang || "en";
+    try {
+      const status = await getEngineStatus();
+      // Intentional multi-window is fine. Only warn on likely leak (many leftovers).
+      if (status.peerEngineCount >= 8) {
+        pushLog({
+          text:
+            `Đang có ${status.peerEngineCount} DubVIEngine — có thể là process sót sau F5. ` +
+            `Mở nhiều cửa sổ vẫn dùng được; nếu GPU đầy hãy End Task các engine không còn cửa sổ tương ứng.`,
+          cls: "warn",
+        });
+      }
+    } catch {
+      /* ignore */
+    }
     setBusy(true);
     sawTerminalRef.current = false;
     userStoppedRef.current = false;
     setCanResume(false);
     setLogs([]);
+    overallFloorRef.current = 0;
+    queueTotalRef.current = files.length;
+    timingFileRef.current = "";
+    setStageDurationsSec({});
+    setStageFractions({});
     setFileProgress({
       current: 0,
       total: 0,
@@ -762,21 +1281,69 @@ export default function App() {
           outputDir,
           voice,
           model,
+          sourceLang,
           audioMode,
           mixDb,
           review,
           force,
-          preferGpu,
+          preferGpu: useGpu,
+          useExistingSubtitles,
+          subtitleFiles,
           translateProvider: settings.translate_provider || "deep-translator",
           ttsProvider: settings.tts_provider || "edge-tts",
           xttsSpeakerWav: settings.xtts_speaker_wav || "",
+          translateConcurrency: settings.translate_concurrency ?? 0,
+          translateFallbackOnline: settings.translate_fallback_online ?? false,
+          ttsConcurrency: settings.tts_concurrency ?? 0,
+          ttsMaxConcurrency: settings.tts_max_concurrency ?? 0,
         },
         onEngineEvent,
       );
       setJobId(id);
+      jobIdRef.current = id;
       setStageLabel("Đang xử lý tuần tự…");
+      // Flush videos added while startJob was in-flight.
+      const buffered = Array.from(new Set(pendingEnqueueRef.current));
+      pendingEnqueueRef.current = [];
+      const already = new Set(files);
+      const toEnqueue = buffered.filter((p) => !already.has(p));
+      if (toEnqueue.length) {
+        try {
+          const result = await enqueueVideos(id, toEnqueue);
+          const n = result.added_count ?? result.added?.length ?? 0;
+          pushLog({
+            text: `Đã thêm ${n} video (xếp lúc khởi động) vào hàng đợi — sẽ chạy tự động`,
+          });
+          if (result.queue?.items?.length) {
+            queueTotalRef.current = result.queue.items.length;
+            setQueue((prev) => {
+              const meta = new Map(prev.map((p) => [p.stem, p]));
+              return result.queue!.items.map((it) => {
+                const prevItem = meta.get(it.stem);
+                return {
+                  ...it,
+                  duration_label: prevItem?.duration_label,
+                  size_label: prevItem?.size_label,
+                  duration_sec: prevItem?.duration_sec,
+                  size_bytes: prevItem?.size_bytes,
+                  from_url:
+                    Boolean(prevItem?.from_url) ||
+                    urlDownloadedPathsRef.current.has(it.input),
+                };
+              });
+            });
+            setOverallProgress((p) => ({
+              ...p,
+              fileTotal: result.queue!.items.length,
+            }));
+          }
+        } catch (e) {
+          pushLog({ text: String(e), cls: "warn" });
+        }
+      }
     } catch (e) {
       setBusy(false);
+      pendingEnqueueRef.current = [];
       setErrFriendly({ title: "Không bắt đầu được", body: String(e) });
       setErrTech(String(e));
       setErrOpen(true);
@@ -1032,11 +1599,14 @@ export default function App() {
           outputDir={outputDir}
           voice={voice}
           model={model}
+          sourceLang={settings.source_lang || "en"}
           audioMode={audioMode}
           mixDb={mixDb}
           review={review}
           force={force}
           preferGpu={preferGpu}
+          useExistingSubtitles={useExistingSubtitles}
+          subtitleCount={subtitleFiles.length}
           ttsProvider={settings.tts_provider || "edge-tts"}
           xttsSpeakers={xttsSpeakers}
           xttsSpeakerWav={settings.xtts_speaker_wav || ""}
@@ -1048,6 +1618,8 @@ export default function App() {
           overallProgress={overallProgress}
           elapsedSec={elapsedSec}
           completedElapsedSec={completedElapsedSec}
+          stageDurationsSec={stageDurationsSec}
+          stageFractions={stageFractions}
           dragOver={dragOver}
           onDragOver={(e) => {
             e.preventDefault();
@@ -1056,18 +1628,43 @@ export default function App() {
           onDragLeave={() => setDragOver(false)}
           onDrop={onBrowserDrop}
           onPickFiles={onPickFiles}
+          onPickFolder={onPickFolder}
           onPickOut={onPickOut}
           onChangeOutput={(v) => rememberDir("output", v)}
-          onVoice={setVoice}
-          onXttsSpeaker={(path) =>
-            setSettings((s) => ({ ...s, xtts_speaker_wav: path }))
-          }
-          onModel={setModel}
-          onAudioMode={setAudioMode}
-          onMixDb={setMixDb}
-          onReview={setReview}
-          onForce={setForce}
-          onGpu={setPreferGpu}
+          onVoice={(v) => {
+            setVoice(v);
+            patchSettings({ voice: v });
+          }}
+          onXttsSpeaker={(path) => patchSettings({ xtts_speaker_wav: path })}
+          onModel={(v) => {
+            setModel(v);
+            patchSettings({ whisper_model: v });
+          }}
+          onSourceLang={(v) => patchSettings({ source_lang: v })}
+          onAudioMode={(v) => {
+            setAudioMode(v);
+            patchSettings({ audio_mode: v });
+          }}
+          onMixDb={(v) => {
+            setMixDb(v);
+            patchSettings({ mix_original_db: v }, { debounceMs: 400 });
+          }}
+          onReview={(v) => {
+            setReview(v);
+            patchSettings({ review_by_default: v });
+          }}
+          onForce={(v) => {
+            setForce(v);
+            patchSettings({ force_rerun: v });
+          }}
+          onUseExistingSubtitles={(v) => {
+            setUseExistingSubtitles(v);
+            patchSettings({ use_existing_subtitles: v });
+          }}
+          onGpu={(v) => {
+            setPreferGpu(v);
+            patchSettings({ device_mode: v ? "auto" : "cpu" });
+          }}
           onStart={onStart}
           onStop={onStop}
           onResume={onResume}
@@ -1106,11 +1703,15 @@ export default function App() {
               setAudioMode(settings.audio_mode);
               setMixDb(settings.mix_original_db);
               setReview(settings.review_by_default);
+              setForce(settings.force_rerun ?? false);
+              setUseExistingSubtitles(settings.use_existing_subtitles ?? false);
               setPreferGpu(settings.device_mode === "auto");
-              if (settings.default_output_dir) setOutputDir(settings.default_output_dir);
-              if (settings.default_download_dir !== undefined) {
-                setDownloadDir(settings.default_download_dir || "");
-              }
+              const out = (settings.default_output_dir || "").trim();
+              const dl = (settings.default_download_dir || "").trim();
+              setOutputDir(out);
+              setDownloadDir(dl);
+              writeLocalDir(LS_OUTPUT_DIR, out);
+              writeLocalDir(LS_DOWNLOAD_DIR, dl);
               pushLog({ text: "Đã lưu cài đặt" });
             } catch (e) {
               pushLog({ text: String(e), cls: "error" });

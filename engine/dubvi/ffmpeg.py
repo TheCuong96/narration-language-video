@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
+import threading
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from .models import ErrorCode
 from .system_info import EngineError, get_logger
 
 log = get_logger("dubvi.ffmpeg")
+
+MIN_AUDIO_DURATION = 0.01
 
 
 def _bundled_bin_dir() -> Path | None:
@@ -119,6 +125,122 @@ def run_ffmpeg(
         ) from e
 
 
+def run_ffmpeg_with_progress(
+    args: list[str],
+    *,
+    duration_sec: float = 0.0,
+    on_progress: Callable[[float], None] | None = None,
+) -> None:
+    """
+    Run FFmpeg and report 0..1 progress via -progress pipe:1 (and stderr time= fallback).
+
+    Used for long mux/re-encode steps so the UI does not sit at 0%.
+    """
+    cmd = list(args)
+    if len(cmd) >= 2:
+        out_idx = len(cmd) - 1
+        cmd = cmd[:out_idx] + ["-progress", "pipe:1", "-nostats"] + cmd[out_idx:]
+
+    log.debug("run (progress): %s", " ".join(cmd))
+    stderr_lines: list[str] = []
+    last_frac = -1.0
+    duration = max(float(duration_sec or 0), 0.0)
+    time_re = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
+
+    def _emit(frac: float) -> None:
+        nonlocal last_frac
+        f = max(0.0, min(1.0, frac))
+        if on_progress and (f >= last_frac + 0.02 or f >= 0.99):
+            last_frac = f
+            on_progress(f)
+
+    def _emit_from_seconds(sec: float) -> None:
+        if duration > 0:
+            _emit(sec / duration)
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            shell=False,
+        )
+    except FileNotFoundError as e:
+        raise EngineError(ErrorCode.FFMPEG_MISSING, f"Không chạy được: {cmd[0]}") from e
+
+    def _read_stdout() -> None:
+        if proc.stdout is None:
+            return
+        for line in proc.stdout:
+            line = line.strip()
+            if line.startswith("out_time_ms="):
+                try:
+                    ms = int(line.split("=", 1)[1])
+                    _emit_from_seconds(ms / 1_000_000.0)
+                except ValueError:
+                    pass
+
+    def _read_stderr() -> None:
+        if proc.stderr is None:
+            return
+        for line in proc.stderr:
+            stderr_lines.append(line)
+            m = time_re.search(line)
+            if m:
+                h, mnt, sec = int(m.group(1)), int(m.group(2)), float(m.group(3))
+                _emit_from_seconds(h * 3600 + mnt * 60 + sec)
+
+    t_out = threading.Thread(target=_read_stdout, daemon=True)
+    t_err = threading.Thread(target=_read_stderr, daemon=True)
+    t_out.start()
+    t_err.start()
+    code = proc.wait()
+    t_out.join(timeout=2)
+    t_err.join(timeout=2)
+
+    if code != 0:
+        err = "".join(stderr_lines).strip()
+        if len(err) > 800:
+            err = err[-800:]
+        raise EngineError(
+            ErrorCode.INTERNAL,
+            f"FFmpeg thất bại (exit {code}): {err or cmd[0]}",
+        )
+    if on_progress:
+        on_progress(1.0)
+
+
+def _video_codec_name(video: Path) -> str:
+    info = probe_streams(video)
+    for s in info.get("streams") or []:
+        if s.get("codec_type") == "video":
+            return str(s.get("codec_name") or "")
+    return ""
+
+
+def _video_stream_args(vcodec: str, *, reencode: bool) -> list[str]:
+    if reencode:
+        return [
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+    args = ["-c:v", "copy"]
+    if vcodec == "av1":
+        args += ["-tag:v", "av01"]
+    elif vcodec in ("hevc", "h265"):
+        args += ["-tag:v", "hvc1"]
+    return args
+
+
 def probe_duration(path: Path) -> float:
     out = subprocess.check_output(
         [
@@ -136,9 +258,124 @@ def probe_duration(path: Path) -> float:
         errors="replace",
         shell=False,
     ).strip()
-    if not out:
+    # ffprobe prints "N/A" for empty/headerless media (e.g. a chunk past the audio end).
+    try:
+        return float(out) if out else 0.0
+    except ValueError:
         return 0.0
-    return float(out)
+
+
+@dataclass(frozen=True)
+class AvTiming:
+    """Stream lengths of the first video/audio streams (seconds)."""
+
+    video_sec: float
+    audio_sec: float
+    frames: int
+    fps: float  # nominal r_frame_rate
+
+
+def _parse_rate(rate: str) -> float:
+    num, _, den = (rate or "").partition("/")
+    try:
+        n, d = float(num), float(den or 1)
+    except ValueError:
+        return 0.0
+    return n / d if d else 0.0
+
+
+def _stream_seconds(stream: dict) -> float:
+    try:
+        return float(stream.get("duration") or 0.0)
+    except ValueError:
+        return 0.0
+
+
+def probe_av_timing(path: Path) -> AvTiming | None:
+    """Return first video+audio stream timing, or None if either is missing."""
+    import json
+
+    out = subprocess.check_output(
+        [
+            ffprobe_path(),
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type,duration,nb_frames,r_frame_rate",
+            "-of",
+            "json",
+            str(path),
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        shell=False,
+    )
+    streams = json.loads(out or "{}").get("streams") or []
+    v = next((s for s in streams if s.get("codec_type") == "video"), None)
+    a = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    if not v or not a:
+        return None
+    try:
+        frames = int(v.get("nb_frames") or 0)
+    except ValueError:
+        frames = 0
+    return AvTiming(
+        video_sec=_stream_seconds(v),
+        audio_sec=_stream_seconds(a),
+        frames=frames,
+        fps=_parse_rate(str(v.get("r_frame_rate") or "")),
+    )
+
+
+def stretched_video_fps(t: AvTiming) -> float | None:
+    """
+    Detect a source whose video PTS are stretched relative to its audio.
+
+    Signature of the broken downloads seen in practice: frames / nominal fps
+    equals the audio length, while the video stream's timestamps run ~1.5x
+    longer — the dub then follows the (shorter) speech and goes silent at the
+    end. Returns the fps to retime frames at, or None if the file looks sane.
+    """
+    # TODO(human)
+
+
+def retime_video_cfr(
+    src: Path,
+    dst: Path,
+    fps: float,
+    *,
+    duration_sec: float = 0.0,
+    on_progress: Callable[[float], None] | None = None,
+) -> None:
+    """Re-stamp every frame at a constant ``fps`` (frame N at N/fps), audio copied."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(dst.stem + ".partial" + dst.suffix)
+    run_ffmpeg_with_progress(
+        [
+            ffmpeg_path(),
+            "-y",
+            "-i",
+            str(src),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0",
+            "-vf",
+            f"setpts=N/({fps:.6f}*TB)",
+            "-r",
+            f"{fps:.6f}",
+            *_video_stream_args("", reencode=True),
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(tmp),
+        ],
+        duration_sec=duration_sec,
+        on_progress=on_progress,
+    )
+    os.replace(tmp, dst)
 
 
 def extract_video_segment(
@@ -259,6 +496,109 @@ def extract_video_segment(
     }
 
 
+def extract_audio_segment(
+    src: Path,
+    dst: Path,
+    start_sec: float,
+    end_sec: float,
+    *,
+    sample_rate: int = 16000,
+) -> None:
+    """Extract [start_sec, end_sec) from an audio file (FLAC/WAV) for chunk processing."""
+    if start_sec < 0:
+        raise EngineError(ErrorCode.INVALID_ARGS, "Thời điểm bắt đầu phải ≥ 0")
+    if end_sec <= start_sec:
+        raise EngineError(
+            ErrorCode.INVALID_ARGS,
+            "Thời điểm kết thúc phải lớn hơn thời điểm bắt đầu",
+        )
+    duration = end_sec - start_sec
+    if duration < 0.05:
+        raise EngineError(ErrorCode.INVALID_ARGS, "Đoạn audio quá ngắn (< 0.05s)")
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists() and dst.stat().st_size > 0:
+        return
+    run_ffmpeg(
+        [
+            ffmpeg_path(),
+            "-y",
+            "-ss",
+            f"{start_sec:.3f}",
+            "-i",
+            str(src),
+            "-t",
+            f"{duration:.3f}",
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            str(sample_rate),
+            "-c:a",
+            "flac",
+            str(dst),
+        ]
+    )
+
+
+def detect_silence_midpoints(
+    audio: Path,
+    *,
+    noise_db: float = -35.0,
+    min_silence_sec: float = 0.35,
+    min_silence_gap: float = 0.5,
+) -> list[float]:
+    """
+    Return approximate midpoints of silent regions (seconds).
+
+    Used to snap chunk boundaries away from speech. Returns [] on failure.
+    """
+    import re
+
+    af = f"silencedetect=noise={noise_db}dB:d={min_silence_sec}"
+    try:
+        proc = subprocess.run(
+            [
+                ffmpeg_path(),
+                "-hide_banner",
+                "-i",
+                str(audio),
+                "-af",
+                af,
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            shell=False,
+            check=False,
+        )
+    except Exception as e:
+        log.warning("silencedetect failed: %s", e)
+        return []
+
+    stderr = proc.stderr or ""
+    starts: list[float] = []
+    ends: list[float] = []
+    for line in stderr.splitlines():
+        m_start = re.search(r"silence_start:\s*([0-9.]+)", line)
+        if m_start:
+            starts.append(float(m_start.group(1)))
+        m_end = re.search(r"silence_end:\s*([0-9.]+)", line)
+        if m_end:
+            ends.append(float(m_end.group(1)))
+
+    midpoints: list[float] = []
+    for i, start in enumerate(starts):
+        end = ends[i] if i < len(ends) else start + min_silence_gap
+        if end - start >= min_silence_gap * 0.5:
+            midpoints.append((start + end) / 2.0)
+    return midpoints
+
+
 def extract_audio_flac(video: Path, flac_out: Path) -> None:
     """
     Extract mono 16 kHz FLAC for Whisper — smaller than PCM WAV,
@@ -287,7 +627,7 @@ def extract_audio_flac(video: Path, flac_out: Path) -> None:
 
 def make_silence(dst: Path, duration_sec: float, *, sample_rate: int = 24000) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
-    dur = max(duration_sec, 0.05)
+    dur = max(duration_sec, MIN_AUDIO_DURATION)
     run_ffmpeg(
         [
             ffmpeg_path(),
@@ -297,7 +637,7 @@ def make_silence(dst: Path, duration_sec: float, *, sample_rate: int = 24000) ->
             "-i",
             f"anullsrc=r={sample_rate}:cl=mono",
             "-t",
-            f"{dur:.3f}",
+            f"{dur:.6f}",
             "-c:a",
             "pcm_s16le",
             str(dst),
@@ -319,135 +659,29 @@ def atempo_filter_chain(tempo: float) -> list[str]:
     return filters
 
 
-def stretch_to_duration(
-    src: Path,
-    dst: Path,
-    target_sec: float,
-    *,
-    allow_spill: bool = True,
-    max_tempo: float = 1.20,
-    min_tempo: float = 0.90,
-    fit_slack: float = 0.0,
-) -> float:
-    """
-    Fit audio into target_sec using atempo + pad.
-
-    Prefer near-natural speed: caller should expand target_sec by borrowing
-    silence gaps before relying on tempo. Default max_tempo is mild (~20%).
-
-    If allow_spill and audio is still longer after max speedup, do NOT trim speech —
-    return the actual duration (caller may spill into following gaps).
-    Returns the duration written to dst.
-    """
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    dur = probe_duration(src)
-    if dur <= 0:
-        make_silence(dst, target_sec)
-        return target_sec
-
-    # fit_slack=0 → aim for full target; >0 (e.g. 0.05) leaves a tiny pad margin
-    slack = max(0.0, min(fit_slack, 0.5))
-    usable = max(target_sec * (1.0 - slack), 0.05)
-    tempo = dur / usable if usable > 0 else 1.0
-    tempo = max(min_tempo, min(tempo, max_tempo))
-
-    filters = atempo_filter_chain(tempo)
-
-    sped_dur = dur / tempo
-    if sped_dur <= target_sec + 0.02:
-        # Pad to exact slot
-        af = ",".join(filters) + f",apad=whole_dur={target_sec:.3f},atrim=0:{target_sec:.3f}"
-        out_dur = target_sec
-    elif allow_spill:
-        # Keep full speech — no atrrim on the end
-        af = ",".join(filters)
-        out_dur = sped_dur
-    else:
-        # Legacy hard trim (not preferred)
-        af = ",".join(filters) + f",atrim=0:{target_sec:.3f},apad=whole_dur={target_sec:.3f}"
-        out_dur = target_sec
-
-    run_ffmpeg(
-        [
-            ffmpeg_path(),
-            "-y",
-            "-i",
-            str(src),
-            "-af",
-            af,
-            "-ar",
-            "24000",
-            "-ac",
-            "1",
-            "-c:a",
-            "pcm_s16le",
-            str(dst),
-        ]
-    )
-    # Verify
-    actual = probe_duration(dst)
-    return actual if actual > 0 else out_dur
+def required_tempo(source_sec: float, allowed_sec: float) -> float:
+    """Return one uniform sentence tempo; never slow audio below 1×."""
+    source = max(float(source_sec), 0.0)
+    allowed = max(float(allowed_sec), MIN_AUDIO_DURATION)
+    if source <= allowed:
+        return 1.0
+    return source / allowed
 
 
-def fit_audio_to_duration(
+def _pad_trim_wav(
     src: Path,
     dst: Path,
     target_sec: float,
     *,
     sample_rate: int = 24000,
 ) -> float:
-    """
-    Time-stretch the whole clip so duration matches target_sec.
-
-    Unlike stretch_to_duration, this never hard-trims speech content: tempo is
-    raised/lowered as much as needed (via stacked atempo) so the full audio fits.
-    A final apad+atrim only corrects float error to an exact length.
-    """
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    target = max(float(target_sec), 0.05)
-    dur = probe_duration(src)
-    if dur <= 0:
-        make_silence(dst, target, sample_rate=sample_rate)
-        return target
-
-    # Already within tolerance — pad if slightly short, else copy as-is.
-    if abs(dur - target) <= 0.05:
-        if dur < target - 0.01:
-            run_ffmpeg(
-                [
-                    ffmpeg_path(),
-                    "-y",
-                    "-i",
-                    str(src),
-                    "-af",
-                    f"apad=whole_dur={target:.3f},atrim=0:{target:.3f}",
-                    "-ar",
-                    str(sample_rate),
-                    "-ac",
-                    "1",
-                    "-c:a",
-                    "pcm_s16le",
-                    str(dst),
-                ]
-            )
-            actual = probe_duration(dst)
-            return actual if actual > 0 else target
-        if src.resolve() != dst.resolve():
-            shutil.copy2(src, dst)
-        return dur
-
-    tempo = dur / target
-    filters = atempo_filter_chain(tempo)
-    # Nail exact length after speed change (tiny atrrim only for float drift).
-    af = ",".join(filters) + f",apad=whole_dur={target:.3f},atrim=0:{target:.3f}"
-
-    # Write via temp when in-place so FFmpeg never reads/writes the same file.
+    """Copy speech at 1× and pad/trim to target_sec. Never changes tempo."""
+    target = max(float(target_sec), MIN_AUDIO_DURATION)
     out = dst
     tmp: Path | None = None
     if src.resolve() == dst.resolve():
-        tmp = dst.with_name(dst.stem + ".__fit__.wav")
+        tmp = dst.with_name(dst.stem + ".__pad__.wav")
         out = tmp
-
     run_ffmpeg(
         [
             ffmpeg_path(),
@@ -455,7 +689,7 @@ def fit_audio_to_duration(
             "-i",
             str(src),
             "-af",
-            af,
+            f"apad=whole_dur={target:.6f},atrim=0:{target:.6f}",
             "-ar",
             str(sample_rate),
             "-ac",
@@ -467,9 +701,234 @@ def fit_audio_to_duration(
     )
     if tmp is not None:
         tmp.replace(dst)
-
     actual = probe_duration(dst)
     return actual if actual > 0 else target
+
+
+def pad_or_trim_audio(
+    src: Path,
+    dst: Path,
+    target_sec: float,
+    *,
+    sample_rate: int = 24000,
+) -> float:
+    """Normalize container length without changing the speaking rate."""
+    return _pad_trim_wav(src, dst, target_sec, sample_rate=sample_rate)
+
+
+def _render_tempo_to_target(
+    src: Path,
+    dst: Path,
+    target_sec: float,
+    tempo: float,
+    *,
+    sample_rate: int = 24000,
+) -> float:
+    """
+    Render all source samples into target_sec, correcting atempo rounding by
+    retrying with a slightly higher uniform tempo.
+
+    Extremely tight slots (two lines almost back-to-back) can hit an atempo
+    rounding floor that no amount of extra speed fixes within a bounded number
+    of retries. As a last resort we hard-cut the tiny unconverged remainder
+    instead of failing the whole video: losing a few ms off one already very
+    crammed sentence is far better than aborting the export, or silently
+    leaving every later line drifting out of sync with the video.
+    """
+    from . import events
+
+    target = max(float(target_sec), MIN_AUDIO_DURATION)
+    current_tempo = max(float(tempo), 1.0)
+    duration_tolerance = 2.0 / sample_rate
+    max_attempts = 12
+    out = dst
+    tmp: Path | None = None
+    if src.resolve() == dst.resolve():
+        tmp = dst.with_name(dst.stem + ".__tempo__.wav")
+        out = tmp
+
+    try:
+        actual = 0.0
+        for attempt in range(max_attempts):
+            filters = atempo_filter_chain(current_tempo)
+            # apad only extends a short result; unlike atrim it cannot discard
+            # final words. If atempo rounding runs long, measure and retry the
+            # complete source with a slightly higher *uniform* tempo.
+            af = ",".join(filters) + f",apad=whole_dur={target:.6f}"
+            run_ffmpeg(
+                [
+                    ffmpeg_path(),
+                    "-y",
+                    "-i",
+                    str(src),
+                    "-af",
+                    af,
+                    "-ar",
+                    str(sample_rate),
+                    "-ac",
+                    "1",
+                    "-c:a",
+                    "pcm_s16le",
+                    str(out),
+                ]
+            )
+            actual = probe_duration(out)
+            if actual <= 0:
+                raise EngineError(ErrorCode.INTERNAL, f"Không đo được audio sau atempo: {out}")
+            if actual <= target + duration_tolerance:
+                break
+            # Grow the safety margin each retry so slow-converging (rounding
+            # limited) cases still land inside tolerance instead of stalling
+            # just above it forever.
+            margin = 1.001 + 0.01 * attempt
+            current_tempo *= (actual / target) * margin
+        else:
+            events.warning(
+                "SENTENCE_TAIL_TRIMMED",
+                f"Câu quá dài so với khung {target:.3f}s (còn dư {actual - target:.3f}s sau "
+                f"{max_attempts} lần tăng tốc) — đã cắt phần dư nhỏ để giữ đồng bộ các câu sau",
+                target_sec=target,
+                actual_sec=actual,
+            )
+            trim_tmp = out.with_name(out.stem + ".__trim__.wav")
+            run_ffmpeg(
+                [
+                    ffmpeg_path(),
+                    "-y",
+                    "-i",
+                    str(out),
+                    "-af",
+                    f"atrim=0:{target:.6f}",
+                    "-ar",
+                    str(sample_rate),
+                    "-ac",
+                    "1",
+                    "-c:a",
+                    "pcm_s16le",
+                    str(trim_tmp),
+                ]
+            )
+            trim_tmp.replace(out)
+            actual = target
+
+        if tmp is not None:
+            tmp.replace(dst)
+        return actual
+    except Exception:
+        if tmp is not None and tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def stretch_to_duration(
+    src: Path,
+    dst: Path,
+    target_sec: float,
+    *,
+    allow_spill: bool = False,
+    max_tempo: float = 8.0,
+    min_tempo: float = 1.0,
+    fit_slack: float = 0.0,
+) -> float:
+    """
+    Fit audio into target_sec using atempo + pad.
+
+    - Longer than target → calculate once and speed up the complete sentence.
+    - Shorter than target → keep 1× (never below min_tempo) and pad silence.
+    - max_tempo only caps legacy ``allow_spill=True`` mode. Strict alignment
+      always uses the exact required tempo, so it never trims sentence content.
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    target = max(float(target_sec), MIN_AUDIO_DURATION)
+    floor = max(float(min_tempo), 1.0)
+    dur = probe_duration(src)
+    if dur <= 0:
+        make_silence(dst, target)
+        return target
+
+    # A sentence that fits is always 1×. Do not use a tolerance above target:
+    # even a small positive overrun must be handled uniformly, not tail-trimmed.
+    if dur <= target:
+        return _pad_trim_wav(src, dst, target)
+
+    slack = max(0.0, min(fit_slack, 0.5))
+    usable = max(target * (1.0 - slack), MIN_AUDIO_DURATION)
+    needed = required_tempo(dur, usable)
+    if allow_spill:
+        ceiling = max(float(max_tempo), floor)
+        tempo = max(floor, min(needed, ceiling))
+    else:
+        # Strict mode must preserve the whole sentence. atempo_filter_chain()
+        # can stack as many filters as needed, so an arbitrary 8× cap would
+        # only force the later atrim to discard the end of very long lines.
+        tempo = max(floor, needed)
+
+    sped_dur = dur / tempo
+
+    if not allow_spill or sped_dur <= target:
+        return _render_tempo_to_target(src, dst, target, tempo)
+
+    if allow_spill:
+        # Legacy spill: keep full speech after capped speedup.
+        af = ",".join(atempo_filter_chain(tempo))
+
+        run_ffmpeg(
+            [
+                ffmpeg_path(),
+                "-y",
+                "-i",
+                str(src),
+                "-af",
+                af,
+                "-ar",
+                "24000",
+                "-ac",
+                "1",
+                "-c:a",
+                "pcm_s16le",
+                str(dst),
+            ]
+        )
+        actual = probe_duration(dst)
+        return actual if actual > 0 else sped_dur
+
+    raise AssertionError("unreachable")
+
+
+def fit_audio_to_duration(
+    src: Path,
+    dst: Path,
+    target_sec: float,
+    *,
+    sample_rate: int = 24000,
+) -> float:
+    """
+    Match duration to target_sec without ever slowing speech.
+
+    Longer than target → speed up (stacked atempo) so full content still fits.
+    Shorter than target → keep 1× and pad silence.
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    target = max(float(target_sec), MIN_AUDIO_DURATION)
+    dur = probe_duration(src)
+    if dur <= 0:
+        make_silence(dst, target, sample_rate=sample_rate)
+        return target
+
+    if dur <= target:
+        return _pad_trim_wav(src, dst, target, sample_rate=sample_rate)
+
+    tempo = required_tempo(dur, target)
+    return _render_tempo_to_target(
+        src,
+        dst,
+        target,
+        tempo,
+        sample_rate=sample_rate,
+    )
 
 
 def concat_wavs(pieces: list[Path], list_file: Path, narration: Path) -> None:
@@ -545,15 +1004,21 @@ def plan_mux(
         copy_ok = False
         reason = f"Container đầu ra {out_suffix} kém tương thích — cần xử lý lại video"
 
-    # WebM/VP9/AV1 in MP4 often cannot copy
-    if out_suffix == ".mp4" and vcodec in {"vp8", "vp9", "av1", "theora", "mpeg4"}:
-        # mpeg4 (ASP) sometimes copies; vp*/av1 into mp4 usually no
-        if vcodec in {"vp8", "vp9", "av1", "theora"}:
-            copy_ok = False
-            reason = (
-                f"Codec video '{vcodec}' không copy được sang {out_suffix} — "
-                "bắt buộc re-encode video"
-            )
+    # VP8/VP9/Theora → MP4 usually needs re-encode. AV1/HEVC can remux with tags.
+    if out_suffix == ".mp4" and vcodec in {"vp8", "vp9", "theora"}:
+        copy_ok = False
+        reason = (
+            f"Codec video '{vcodec}' không copy được sang {out_suffix} — "
+            "bắt buộc re-encode video"
+        )
+    elif out_suffix == ".mp4" and vcodec in {"av1", "hevc", "h265"}:
+        copy_ok = True
+        reason = (
+            f"Sao chép {vcodec} sang MP4 (remux, tag container — không re-encode)"
+        )
+    elif out_suffix == ".mp4" and vcodec == "mpeg4":
+        copy_ok = False
+        reason = f"Codec video '{vcodec}' — re-encode sang H.264 cho tương thích MP4"
 
     if audio_mode == AudioMode.DUAL_TRACK and not astreams:
         # Still fine — only VI track
@@ -582,6 +1047,8 @@ def mux_video(
     audio_mode: "AudioMode | str" = "vi_only",
     mix_original_db: float = -18.0,
     allow_reencode: bool = True,
+    duration_sec: float = 0.0,
+    on_progress: Callable[[float], None] | None = None,
 ) -> "MuxPlan":
     """
     Mux narration onto video without modifying the source file.
@@ -599,8 +1066,11 @@ def mux_video(
 
     output.parent.mkdir(parents=True, exist_ok=True)
     plan = plan_mux(video, output, audio_mode, allow_reencode=allow_reencode)
+    vcodec = _video_codec_name(video)
+    duration = duration_sec if duration_sec > 0 else probe_duration(video)
 
     if plan.reencode_video:
+        mins = duration / 60.0 if duration > 0 else 0
         events.warning(
             "REENCODE_REQUIRED",
             plan.reason,
@@ -608,19 +1078,22 @@ def mux_video(
             output=str(output),
             audio_mode=audio_mode.value,
         )
+        if mins >= 5:
+            events.log(
+                f"Re-encode video ~{mins:.0f} phút — có thể mất vài chục phút trên CPU; "
+                "thanh tiến độ sẽ cập nhật dần",
+                level="warn",
+            )
     else:
         events.log(plan.reason)
 
     tmp = output.with_name(f"{output.stem}.partial{output.suffix}")
-    cmd: list[str] = [ffmpeg_path(), "-y", "-i", str(video), "-i", str(narration)]
 
-    vcodec_args = (
-        ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
-        if plan.reencode_video
-        else ["-c:v", "copy"]
-    )
+    def _build_cmd(*, reencode: bool) -> list[str]:
+        cmd: list[str] = [ffmpeg_path(), "-y", "-i", str(video), "-i", str(narration)]
+        vcodec_args = _video_stream_args(vcodec, reencode=reencode)
+        movflags = ["-movflags", "+faststart"] if output.suffix.lower() == ".mp4" else []
 
-    try:
         if audio_mode == AudioMode.VI_ONLY:
             cmd += [
                 "-map",
@@ -628,6 +1101,7 @@ def mux_video(
                 "-map",
                 "1:a:0",
                 *vcodec_args,
+                *movflags,
                 "-c:a",
                 "aac",
                 "-b:a",
@@ -636,7 +1110,6 @@ def mux_video(
                 str(tmp),
             ]
         elif audio_mode == AudioMode.DUAL_TRACK:
-            # Keep original audio (if any) + Vietnamese
             cmd += [
                 "-map",
                 "0:v:0",
@@ -645,6 +1118,7 @@ def mux_video(
                 "-map",
                 "1:a:0",
                 *vcodec_args,
+                *movflags,
                 "-c:a",
                 "aac",
                 "-b:a",
@@ -675,6 +1149,7 @@ def mux_video(
                     "-map",
                     "1:a:0",
                     *vcodec_args,
+                    *movflags,
                     "-c:a",
                     "aac",
                     "-b:a",
@@ -697,6 +1172,7 @@ def mux_video(
                     "-map",
                     "[aout]",
                     *vcodec_args,
+                    *movflags,
                     "-c:a",
                     "aac",
                     "-b:a",
@@ -706,8 +1182,43 @@ def mux_video(
                 ]
         else:
             raise EngineError(ErrorCode.INVALID_ARGS, f"Audio mode không hỗ trợ: {audio_mode}")
+        return cmd
 
-        run_ffmpeg(cmd)
+    try:
+        reencode = plan.reencode_video
+        try:
+            run_ffmpeg_with_progress(
+                _build_cmd(reencode=reencode),
+                duration_sec=duration,
+                on_progress=on_progress,
+            )
+        except EngineError:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+            if not reencode and allow_reencode:
+                events.log(
+                    "Remux (copy) thất bại — thử re-encode H.264…",
+                    level="warn",
+                )
+                reencode = True
+                run_ffmpeg_with_progress(
+                    _build_cmd(reencode=True),
+                    duration_sec=duration,
+                    on_progress=on_progress,
+                )
+                plan = MuxPlan(
+                    video_codec_copy=False,
+                    reencode_video=True,
+                    reason="Remux thất bại — đã re-encode H.264",
+                    output_suffix=plan.output_suffix,
+                    audio_mode=plan.audio_mode,
+                )
+            else:
+                raise
+
         if output.exists():
             output.unlink()
         tmp.replace(output)

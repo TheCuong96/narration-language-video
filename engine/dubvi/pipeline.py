@@ -6,7 +6,7 @@ import asyncio
 import time
 from pathlib import Path
 
-from . import audio, cache, events, queue, review, transcription, translation, tts
+from . import audio, cache, chunks, events, queue, review, subtitles, transcription, translation, tts
 from .jobs import CancellationToken, create_job, update_job_state, video_work_dir
 from .models import (
     AudioMode,
@@ -55,9 +55,62 @@ def _has_vi(work: Path) -> bool:
     return bool(segs and all(s.text_vi for s in segs))
 
 
+def _needs_whisper(cfg: JobConfig) -> bool:
+    return cfg.start_from not in (StartFrom.TTS, StartFrom.MUX)
+
+
+def _ensure_whisper(model_box: list, cfg: JobConfig) -> object:
+    """Load Whisper on first use (SRT-preferred jobs skip it until a video has no sidecar)."""
+    if model_box:
+        return model_box[0]
+    loaded, device_info = transcription.load_whisper_model(
+        cfg.whisper_model,
+        prefer_gpu=cfg.prefer_gpu,
+    )
+    model_box.append(loaded)
+    if device_info.fallback_reason:
+        events.log(device_info.fallback_reason, level="warn")
+    return loaded
+
+
+def _mark_subtitle_progress(tracker: ProgressTracker, segments_vi: list, source: str) -> None:
+    tracker.skip_asr_pipeline(f"Dùng phụ đề có sẵn ({len(segments_vi)} đoạn)")
+    events.log(f"Dùng phụ đề có sẵn: {source} ({len(segments_vi)} đoạn) — bỏ qua nhận dạng và dịch")
+
+
+def _vi_cache_matches(work, cfg):
+    segments = cache.load_segments(work / cache.TRANSCRIPT_EN)
+    return bool(segments) and translation.cache_matches(
+        work / cache.TRANSCRIPT_VI, segments, source_lang=cfg.source_lang,
+        target_lang=cfg.target_lang, provider_name=cfg.translate_provider,
+        terms=cfg.terms, fallback_online=cfg.translate_fallback_online)
+
+
+def _try_load_existing_subtitles(
+    video: Path,
+    work: Path,
+    cfg: JobConfig,
+    tracker: ProgressTracker,
+) -> list | None:
+    """Load Vietnamese SRT/VTT when a sidecar exists. None → fall back to ASR + translate."""
+    if cfg.start_from in (StartFrom.TTS, StartFrom.MUX) and _has_vi(work):
+        segments_vi = cache.load_segments(work / cache.TRANSCRIPT_VI) or []
+        _mark_subtitle_progress(tracker, segments_vi, "cache")
+        return segments_vi
+
+    sub_path = subtitles.find_subtitle_for_video(video, cfg.subtitle_files)
+    if sub_path is None:
+        return None
+    segments_vi = subtitles.parse_subtitle_file(sub_path)
+    cache.save_segments(work / cache.TRANSCRIPT_VI, segments_vi)
+    cache.save_segments(work / cache.TRANSCRIPT_EN, segments_vi)
+    _mark_subtitle_progress(tracker, segments_vi, sub_path.name)
+    return segments_vi
+
+
 def process_one(
     video: Path,
-    model,
+    model_box: list,
     cfg: JobConfig,
     job_root: Path,
     cancel: CancellationToken,
@@ -68,6 +121,9 @@ def process_one(
     """
     Process a single video sequentially.
     Returns output path, or None if paused for translation review.
+
+    model_box is a 0/1-item list holding the Whisper model so we can drop the
+    caller's reference before XTTS (needed to actually free VRAM).
     """
     name = video.stem
     work = video_work_dir(job_root, name)
@@ -78,7 +134,12 @@ def process_one(
         file_name=video.name,
     )
 
-    if output.exists() and not cfg.force and cfg.start_from == StartFrom.AUTO:
+    translation_changed = not cfg.use_existing_subtitles and _has_vi(work) and not _vi_cache_matches(work, cfg)
+    if translation_changed:
+        events.log("Cache bản dịch không khớp provider/model; tiến hành dịch lại")
+        cache.clear_downstream(work, keep_en=True)
+
+    if output.exists() and not cfg.force and not translation_changed and cfg.start_from == StartFrom.AUTO:
         events.log(f"Bỏ qua (đã có): {output.name}")
         events.file_completed(str(video), str(output), skipped=True)
         queue.update_item(cfg.job_id, name, status=QueueItemStatus.SKIPPED, output=str(output))
@@ -94,9 +155,39 @@ def process_one(
     cancel.check()
 
     ensure_disk_space(video, work, cfg.output_dir)
-    duration = probe_duration(video)
+    # Names/queue keep the original path; timing, extract and mux use the
+    # (possibly retimed) media file.
+    media = audio.normalize_source(video, work, tracker=tracker)
+    cancel.check()
+    duration = probe_duration(media)
     events.log(f"Độ dài: {duration / 60:.1f} phút")
     tracker.emit(1, 1, f"Độ dài {duration / 60:.1f} phút")
+
+    segments: list = []
+    segments_vi: list = []
+    if cfg.use_existing_subtitles:
+        loaded_subs = _try_load_existing_subtitles(video, work, cfg, tracker)
+        if loaded_subs is not None:
+            cancel.check()
+            return _after_translation(
+                video=video,
+                work=work,
+                output=output,
+                segments_vi=loaded_subs,
+                duration=duration,
+                cfg=cfg,
+                cancel=cancel,
+                t0=t0,
+                tracker=tracker,
+                model_box=model_box,
+            )
+        events.log(
+            f"Không thấy *_vi.srt cho {video.name} — chuyển sang tự dịch (nhận dạng + dịch)"
+        )
+
+    model = _ensure_whisper(model_box, cfg) if _needs_whisper(cfg) else (
+        model_box[0] if model_box else None
+    )
 
     # --- extract ---
     if cfg.start_from == StartFrom.EXTRACT or not _should_skip_extract(work, cfg.start_from):
@@ -104,7 +195,7 @@ def process_one(
             flac = work / cache.AUDIO_FLAC
             if flac.exists():
                 flac.unlink()
-        flac = audio.extract_for_whisper(video, work, tracker=tracker)
+        flac = audio.extract_for_whisper(media, work, tracker=tracker)
     else:
         flac = work / cache.AUDIO_FLAC
         tracker.begin_stage(Stage.EXTRACTING, "Dùng cache âm thanh")
@@ -112,52 +203,126 @@ def process_one(
         events.log("Dùng cache audio.flac")
     cancel.check()
 
-    # --- transcribe ---
-    if cfg.start_from in (StartFrom.TRANSCRIBE,):
-        tp = work / cache.TRANSCRIPT_EN
-        if tp.exists():
-            tp.unlink()
-    if cfg.start_from in (StartFrom.TRANSLATE, StartFrom.TTS, StartFrom.MUX) and (
-        work / cache.TRANSCRIPT_EN
-    ).exists():
-        segments = cache.load_segments(work / cache.TRANSCRIPT_EN) or []
-        tracker.begin_stage(Stage.TRANSCRIBING, "Dùng cache nhận dạng")
-        tracker.emit(1, 1, f"Cache: {len(segments)} đoạn")
-        events.log("Dùng cache transcript tiếng Anh")
+    use_chunks = chunks.should_use_chunks(duration, cfg)
+
+    if use_chunks and cfg.start_from in (
+        StartFrom.AUTO,
+        StartFrom.EXTRACT,
+        StartFrom.TRANSCRIBE,
+        StartFrom.TRANSLATE,
+    ):
+        if cfg.start_from == StartFrom.TRANSCRIBE:
+            for name in (cache.TRANSCRIPT_EN, cache.TRANSCRIPT_VI):
+                p = work / name
+                if p.exists():
+                    p.unlink()
+        if cfg.start_from == StartFrom.TRANSLATE:
+            cache.clear_downstream(work, keep_en=True)
+
+        merged_en = work / cache.TRANSCRIPT_EN
+        merged_vi = work / cache.TRANSCRIPT_VI
+        if cfg.start_from in (StartFrom.TTS, StartFrom.MUX) and _has_vi(work):
+            segments_vi = cache.load_segments(merged_vi) or []
+            segments = cache.load_segments(merged_en) or []
+            tracker.begin_stage(Stage.TRANSLATING, "Dùng cache bản dịch (chunk)")
+            tracker.emit(1, 1, f"Cache: {len(segments_vi)} đoạn")
+            events.log("Dùng cache bản dịch chunk đã ghép")
+        elif _has_vi(work) and cfg.start_from == StartFrom.AUTO and _vi_cache_matches(work, cfg):
+            segments_vi = cache.load_segments(merged_vi) or []
+            segments = cache.load_segments(merged_en) or []
+            tracker.begin_stage(Stage.TRANSLATING, "Dùng cache bản dịch (chunk)")
+            tracker.emit(1, 1, f"Cache: {len(segments_vi)} đoạn")
+            events.log("Dùng cache bản dịch chunk đã ghép")
+        else:
+            segments, segments_vi = chunks.process_early_stages_chunked(
+                full_flac=flac,
+                work=work,
+                duration=duration,
+                model=model,
+                cfg=cfg,
+                cancel=cancel,
+                tracker=tracker,
+            )
     else:
-        segments = transcription.transcribe(
-            flac,
-            work / cache.TRANSCRIPT_EN,
-            model,
-            source_lang=cfg.source_lang,
-            cancel=cancel,
-            tracker=tracker,
-            duration_sec=duration,
-        )
-    events.log(f"Số đoạn: {len(segments)}")
+        # --- transcribe ---
+        if cfg.start_from in (StartFrom.TRANSCRIBE,):
+            tp = work / cache.TRANSCRIPT_EN
+            if tp.exists():
+                tp.unlink()
+        if cfg.start_from in (StartFrom.TRANSLATE, StartFrom.TTS, StartFrom.MUX) and (
+            work / cache.TRANSCRIPT_EN
+        ).exists():
+            segments = cache.load_segments(work / cache.TRANSCRIPT_EN) or []
+            tracker.begin_stage(Stage.TRANSCRIBING, "Dùng cache nhận dạng")
+            tracker.emit(1, 1, f"Cache: {len(segments)} đoạn")
+            events.log("Dùng cache transcript tiếng Anh")
+        else:
+            segments = transcription.transcribe(
+                flac,
+                work / cache.TRANSCRIPT_EN,
+                model,
+                source_lang=cfg.source_lang,
+                cancel=cancel,
+                tracker=tracker,
+                duration_sec=duration,
+            )
+        cancel.check()
+
+        # --- translate ---
+        if cfg.start_from == StartFrom.TRANSLATE:
+            cache.clear_downstream(work, keep_en=True)
+
+        if cfg.start_from in (StartFrom.TTS, StartFrom.MUX) and _has_vi(work):
+            segments_vi = cache.load_segments(work / cache.TRANSCRIPT_VI) or []
+            tracker.begin_stage(Stage.TRANSLATING, "Dùng cache bản dịch")
+            tracker.emit(1, 1, f"Cache: {len(segments_vi)} đoạn")
+            events.log("Dùng cache bản dịch tiếng Việt")
+        else:
+            segments_vi = translation.translate_segments(
+                segments,
+                work / cache.TRANSCRIPT_VI,
+                source_lang=cfg.source_lang,
+                target_lang=cfg.target_lang,
+                terms=cfg.terms,
+                cancel=cancel,
+                tracker=tracker,
+                provider_name=cfg.translate_provider,
+                prefer_gpu=cfg.prefer_gpu,
+                concurrency=cfg.translate_concurrency,
+                fallback_online=cfg.translate_fallback_online,
+            )
+
     cancel.check()
+    return _after_translation(
+        video=video,
+        work=work,
+        output=output,
+        segments_vi=segments_vi,
+        duration=duration,
+        cfg=cfg,
+        cancel=cancel,
+        t0=t0,
+        tracker=tracker,
+        model_box=model_box,
+    )
 
-    # --- translate ---
-    if cfg.start_from == StartFrom.TRANSLATE:
-        cache.clear_downstream(work, keep_en=True)
 
-    if cfg.start_from in (StartFrom.TTS, StartFrom.MUX) and _has_vi(work):
-        segments_vi = cache.load_segments(work / cache.TRANSCRIPT_VI) or []
-        tracker.begin_stage(Stage.TRANSLATING, "Dùng cache bản dịch")
-        tracker.emit(1, 1, f"Cache: {len(segments_vi)} đoạn")
-        events.log("Dùng cache bản dịch tiếng Việt")
-    else:
-        segments_vi = translation.translate_segments(
-            segments,
-            work / cache.TRANSCRIPT_VI,
-            source_lang=cfg.source_lang,
-            target_lang=cfg.target_lang,
-            terms=cfg.terms,
-            cancel=cancel,
-            tracker=tracker,
-            provider_name=cfg.translate_provider,
-            prefer_gpu=cfg.prefer_gpu,
-        )
+def _after_translation(
+    *,
+    video: Path,
+    work: Path,
+    output: Path,
+    segments_vi,
+    duration: float,
+    cfg: JobConfig,
+    cancel: CancellationToken,
+    t0: float,
+    tracker: ProgressTracker,
+    model_box: list,
+) -> Path | None:
+    name = video.stem
+    events.log(f"Số đoạn: {len(segments_vi)}")
+    cancel.check()
 
     script_path = work / cache.SCRIPT_VI
     lines = [f"[{s.start:.1f}-{s.end:.1f}] {s.text_vi}" for s in segments_vi]
@@ -183,6 +348,16 @@ def process_one(
             return None
 
     # --- TTS + align + mux ---
+    # Drop every Python ref to Whisper/NLLB before XTTS so CUDA memory can be freed.
+    if (cfg.tts_provider or "").lower().startswith("xtts"):
+        model_box.clear()
+        transcription.unload_whisper_model()
+        try:
+            from .providers import offline as offline_providers
+
+            offline_providers.unload_nllb_model()
+        except Exception:
+            pass
     return _finish_from_tts(
         video=video,
         work=work,
@@ -211,10 +386,10 @@ def _finish_from_tts(
     cancel.check()
     if cfg.start_from == StartFrom.MUX and (work / cache.NARRATION).exists():
         narration = work / cache.NARRATION
-        events.log("Dùng cache narration.wav")
+        events.log("Dùng cache narration")
         if tracker:
             tracker.begin_stage(Stage.TTS, "Dùng cache narration")
-            tracker.emit(1, 1, "Đã có narration.wav")
+            tracker.emit(1, 1, "Đã có narration")
             tracker.begin_stage(Stage.ALIGNING, "Bỏ qua căn giờ (đã có narration)")
             tracker.emit(1, 1, "OK")
     else:
@@ -240,6 +415,8 @@ def _finish_from_tts(
                 prefer_gpu=cfg.prefer_gpu,
                 speaker_wav=cfg.xtts_speaker_wav,
                 language=cfg.target_lang or "vi",
+                concurrency=cfg.tts_concurrency,
+                max_concurrency=cfg.tts_max_concurrency,
             )
         )
         cancel.check()
@@ -254,7 +431,7 @@ def _finish_from_tts(
 
     cancel.check()
     audio.mux(
-        video,
+        audio.media_source(video, work),
         narration,
         output,
         audio_mode=cfg.audio_mode,
@@ -325,10 +502,19 @@ def continue_stem(cfg: JobConfig, stem: str) -> int:
     cfg.review_translation = False
     cfg.translate_only = False
     try:
-        duration = probe_duration(video)
+        duration = probe_duration(audio.media_source(video, work))
         output = Path(item["output"])
         queue.update_item(jid, stem, status=QueueItemStatus.RUNNING)
-        tracker = ProgressTracker(file_index=0, file_total=1, file_name=video.name)
+        qitems = list(q.get("items") or []) if q else []
+        try:
+            idx0 = next(i for i, queued in enumerate(qitems) if queued.get("stem") == stem)
+        except StopIteration:
+            idx0 = 0
+        tracker = ProgressTracker(
+            file_index=idx0,
+            file_total=max(len(qitems), 1),
+            file_name=video.name,
+        )
         # Assume earlier stages done when continuing from review
         for st in (
             Stage.INIT,
@@ -383,8 +569,15 @@ def run_job(cfg: JobConfig) -> int:
             "audio_mode": cfg.audio_mode.value,
             "review_translation": cfg.review_translation,
             "translate_provider": cfg.translate_provider,
+            "translate_concurrency": cfg.translate_concurrency,
+            "source_lang": cfg.source_lang,
+            "target_lang": cfg.target_lang,
+            "extra_terms": cfg.extra_terms,
+            "translate_fallback_online": cfg.translate_fallback_online,
             "tts_provider": cfg.tts_provider,
             "xtts_speaker_wav": cfg.xtts_speaker_wav,
+            "use_existing_subtitles": cfg.use_existing_subtitles,
+            "subtitle_files": [str(p) for p in cfg.subtitle_files],
         },
         job_id=cfg.job_id,
     )
@@ -415,50 +608,67 @@ def run_job(cfg: JobConfig) -> int:
             qdata = existing
         events.queue_updated(qdata)
 
-        need_model = cfg.start_from not in (StartFrom.TTS, StartFrom.MUX)
-        model = None
-        if need_model:
-            # Still may need model if cache missing
-            model, device_info = transcription.load_whisper_model(
-                cfg.whisper_model,
-                prefer_gpu=cfg.prefer_gpu,
-            )
-            if device_info.fallback_reason:
-                events.log(device_info.fallback_reason, level="warn")
+        model_box: list = []
+        # SRT-preferred jobs skip Whisper until a video has no sidecar.
+        if _needs_whisper(cfg) and not cfg.use_existing_subtitles:
+            _ensure_whisper(model_box, cfg)
 
         failed: list[str] = []
         review_paused: list[str] = []
         last_output: str | None = None
+        # Re-read queue each round so videos appended mid-job are picked up automatically.
+        processed_this_run: set[str] = set()
+        also_stems = list(cfg.retry_stems or [])
 
-        for idx, video in enumerate(videos):
+        while True:
+            item = queue.next_work_item(
+                jid,
+                also_stems=also_stems,
+                exclude_stems=processed_this_run,
+            )
+            if item is None:
+                break
+            stem = str(item.get("stem") or "")
+            processed_this_run.add(stem)
+
+            video = Path(str(item["input"]))
+            qsnap = queue.load_queue(jid) or {}
+            qitems = list(qsnap.get("items") or [])
+            total = max(len(qitems), 1)
+            try:
+                idx0 = next(i for i, it in enumerate(qitems) if it.get("stem") == stem)
+            except StopIteration:
+                idx0 = len(processed_this_run) - 1
+            n_done = sum(
+                1
+                for it in qitems
+                if it.get("status")
+                in (QueueItemStatus.COMPLETED.value, QueueItemStatus.SKIPPED.value)
+            )
+
             events.progress(
                 Stage.QUEUED,
-                idx,
-                len(videos),
-                f"Bắt đầu video {idx + 1}/{len(videos)}: {video.name}",
-                percent=0 if len(videos) else 0,
-                overall_percent=round(100.0 * idx / max(len(videos), 1), 1),
+                idx0,
+                total,
+                f"Bắt đầu video {idx0 + 1}/{total}: {video.name}",
+                percent=0,
+                overall_percent=round(100.0 * n_done / total, 1),
                 file=video.name,
-                file_index=idx + 1,
-                file_total=len(videos),
+                file_index=idx0 + 1,
+                file_total=total,
                 stage_label="Hàng đợi",
             )
             try:
                 cancel.check()
-                # Lazy-load model if first file that needs it
-                if model is None:
-                    model, device_info = transcription.load_whisper_model(
-                        cfg.whisper_model,
-                        prefer_gpu=cfg.prefer_gpu,
-                    )
+                # Whisper is loaded in process_one (including SRT → auto-translate fallback).
                 out = process_one(
                     video,
-                    model,
+                    model_box,
                     cfg,
                     job_root,
                     cancel,
-                    file_index=idx,
-                    file_total=len(videos),
+                    file_index=idx0,
+                    file_total=total,
                 )
                 if out is None:
                     review_paused.append(video.stem)
@@ -493,6 +703,10 @@ def run_job(cfg: JobConfig) -> int:
                     code=ErrorCode.INTERNAL.value,
                 )
                 failed.append(video.name)
+                events.queue_updated(queue.load_queue(jid) or {})
+
+            # Keep looping so other videos can still reach review / finish.
+            # Mid-run appends stay pending until this run ends or they are picked up.
 
         if review_paused and not failed:
             update_job_state(jid, status="review", review_stems=review_paused)
@@ -518,9 +732,15 @@ def run_job(cfg: JobConfig) -> int:
             )
             return 1
 
+        final_q = queue.load_queue(jid) or {}
+        final_count = len(final_q.get("items") or [])
         update_job_state(jid, status="completed", output=last_output)
         events.stage(Stage.DONE, "Hoàn tất tất cả video")
-        events.completed(last_output, job_id=jid, count=len(videos))
+        events.completed(
+            last_output,
+            job_id=jid,
+            count=final_count or len(processed_this_run),
+        )
         return 0
 
     except EngineError as e:

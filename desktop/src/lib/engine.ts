@@ -7,6 +7,7 @@ import type {
   ProbeInfo,
   QueueState,
   SegmentRow,
+  MediaScan,
   WhisperModelInfo,
   XttsSpeakerOption,
 } from "./types";
@@ -39,6 +40,14 @@ async function ensureEngineListen(onEvent: EventHandler): Promise<void> {
 
 export async function pickVideos(): Promise<string[]> {
   return invoke<string[]>("pick_videos");
+}
+
+export async function pickInputFolder(): Promise<string | null> {
+  return invoke<string | null>("pick_input_folder");
+}
+
+export async function expandAndMatchMedia(paths: string[]): Promise<MediaScan> {
+  return invoke<MediaScan>("expand_and_match_media", { paths });
 }
 
 export async function pickOutputDir(): Promise<string | null> {
@@ -176,6 +185,23 @@ export async function downloadUrl(
   });
 }
 
+export interface EngineStatus {
+  jobId: string | null;
+  childPid: number | null;
+  running: boolean;
+  /** DubVIEngine processes on this machine (this job + peers/orphans). */
+  peerEngineCount: number;
+}
+
+export async function getEngineStatus(): Promise<EngineStatus> {
+  return invoke<EngineStatus>("get_engine_status");
+}
+
+/** Attach/replace the engine-event listener without starting a job (F5 rehydrate). */
+export async function attachEngineListener(onEvent: EventHandler): Promise<void> {
+  await ensureEngineListen(onEvent);
+}
+
 export async function startJob(options: JobOptions, onEvent: EventHandler): Promise<string> {
   if (!(await isTauri())) throw new Error("Cần Tauri để bắt đầu job");
   await ensureEngineListen(onEvent);
@@ -208,6 +234,22 @@ export async function getQueue(jobId: string): Promise<QueueState> {
   return invoke<QueueState>("get_queue", { jobId });
 }
 
+export interface EnqueueResult {
+  ok: boolean;
+  job_id: string;
+  added: string[];
+  added_count: number;
+  queue?: QueueState;
+}
+
+/** Append videos to a running job — they process automatically after the current file. */
+export async function enqueueVideos(
+  jobId: string,
+  files: string[],
+): Promise<EnqueueResult> {
+  return invoke<EnqueueResult>("enqueue_videos", { jobId, files });
+}
+
 export async function reviewGet(jobId: string, stem: string): Promise<{ segments: SegmentRow[] }> {
   return invoke("review_get", { jobId, stem });
 }
@@ -234,17 +276,33 @@ export async function listModels(): Promise<WhisperModelInfo[]> {
 }
 
 export async function downloadModel(modelId: string, onEvent?: EventHandler): Promise<void> {
-  if (onEvent && (await isTauri())) {
-    const { listen } = await import("@tauri-apps/api/event");
-    const un = await listen<EngineEvent>("engine-event", (e) => onEvent(e.payload));
-    try {
-      await invoke("download_model", { modelId });
-    } finally {
-      un();
-    }
-    return;
-  }
-  await invoke("download_model", { modelId });
+  if (!(await isTauri())) throw new Error("Cần Tauri để tải model");
+  const { listen } = await import("@tauri-apps/api/event");
+  // Rust returns when it spawns the process. Keep listening until the actual
+  // model terminal event, otherwise progress disappears and catalog refreshes early.
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let unlisten: (() => void) | null = null;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      unlisten?.();
+      if (error) reject(error); else resolve();
+    };
+    void listen<EngineEvent>("engine-event", (event) => {
+      const ev = event.payload;
+      onEvent?.(ev);
+      if (ev.type === "completed" && ev.model === modelId) finish();
+      if (ev.type === "error" && ev.fatal) finish(new Error(ev.message || "Tải model thất bại"));
+      if (ev.type === "cancelled") finish(new Error("Đã hủy tải model"));
+      if (ev.type === "engine_exited" && ev.job_id === `model-${modelId}`) {
+        finish(new Error("Engine kết thúc trước khi tải model hoàn tất"));
+      }
+    }).then((un) => {
+      unlisten = un;
+      void invoke("download_model", { modelId }).catch((error) => finish(new Error(String(error))));
+    }).catch((error) => finish(new Error(String(error))));
+  });
 }
 
 export async function deleteModel(modelId: string): Promise<void> {
@@ -267,9 +325,40 @@ export async function privacyNotice(): Promise<Record<string, unknown>> {
   return invoke("privacy_notice");
 }
 
+export function isVideoPath(path: string): boolean {
+  return /\.(mp4|mkv|mov|avi|webm)$/i.test(path);
+}
+
+export function isSubtitlePath(path: string): boolean {
+  return /\.(srt|vtt)$/i.test(path);
+}
+
+/** Folder drop: last segment has no typical file extension. */
+export function isLikelyFolderPath(path: string): boolean {
+  const name = path.split(/[\\/]/).pop() || "";
+  return !!name && !/\.[a-z0-9]{1,5}$/i.test(name);
+}
+
+export function splitMediaPaths(paths: string[]): {
+  videos: string[];
+  subtitles: string[];
+} {
+  const videos: string[] = [];
+  const subtitles: string[] = [];
+  for (const p of paths) {
+    if (isSubtitlePath(p)) subtitles.push(p);
+    else if (isVideoPath(p) || isLikelyFolderPath(p)) videos.push(p);
+  }
+  return { videos, subtitles };
+}
+
 export function filterVideoFiles(files: FileList | File[]): File[] {
   const exts = [".mp4", ".mkv", ".mov", ".avi", ".webm"];
   return Array.from(files).filter((f) =>
     exts.some((e) => f.name.toLowerCase().endsWith(e)),
   );
+}
+
+export async function openOllamaDownload(): Promise<void> {
+  await invoke("open_ollama_download");
 }

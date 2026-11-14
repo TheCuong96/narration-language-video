@@ -25,6 +25,9 @@ def get_translate_provider(
     key = (name or "deep-translator").strip().lower()
     if key in ("deep-translator", "community", "google-free"):
         return GoogleDeepTranslator()
+    if key.startswith("translategemma"):
+        from .ollama import TranslateGemmaProvider
+        return TranslateGemmaProvider(model=key)
     if key in ("nllb", "nllb-offline", "offline-translate"):
         from .offline import NllbTranslateProvider
 

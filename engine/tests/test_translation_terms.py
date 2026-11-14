@@ -24,7 +24,10 @@ def test_protect_tokens_avoid_xterm_style():
     assert restore_terms(protected, mapping) == text
 
 
-def test_google_deep_translator_handles_protected_ssr():
+def test_google_deep_translator_handles_protected_ssr(monkeypatch):
+    import deep_translator
+    from unittest.mock import Mock
+    monkeypatch.setattr(deep_translator, "GoogleTranslator", Mock(return_value=Mock(translate=Mock(return_value="SSG, ISR và {{T0}}"))))
     text = "You might have heard me talking about SSG, ISR, and SSR plenty of times in my courses."
     protected, mapping = protect_terms(text, ["SSR"])
     vi = GoogleDeepTranslator().translate(protected, source="en", target="vi")

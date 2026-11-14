@@ -9,19 +9,9 @@ $Version = "0.1.0"
 $Release = Join-Path $Root "release"
 New-Item -ItemType Directory -Force -Path $Release | Out-Null
 
-# Ensure VS / cargo on PATH when possible
+# Ensure VS / cargo on PATH when possible (do not use Enter-VsDevShell — it can close CMD)
 $env:Path = "$env:USERPROFILE\.cargo\bin;" + $env:Path
-$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-if (Test-Path $vswhere) {
-    $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-    if ($vs) {
-        $devShell = Join-Path $vs "Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
-        if (Test-Path $devShell) {
-            Import-Module $devShell
-            Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=x64" | Out-Null
-        }
-    }
-}
+. (Join-Path $PSScriptRoot "import-vs-dev-env.ps1")
 
 Write-Host "=== 1) FFmpeg ===" -ForegroundColor Cyan
 & (Join-Path $PSScriptRoot "download-ffmpeg.ps1")
@@ -37,26 +27,10 @@ Copy-Item -Force (Join-Path $Root "resources\bin\ffprobe.exe") $ResBin
 
 Write-Host "=== 3) Desktop (Tauri) ===" -ForegroundColor Cyan
 Set-Location (Join-Path $Root "desktop")
-if (-not (Test-Path "node_modules")) { npm install }
-npm run tauri build
-if ($LASTEXITCODE -ne 0) { throw "tauri build failed" }
-
-$bundleDir = Join-Path $Root "desktop\src-tauri\target\release\bundle\nsis"
-$setup = Get-ChildItem -Path $bundleDir -Filter "*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $setup) {
-    Write-Warning "NSIS bundle not found under $bundleDir - check tauri build output."
-    Write-Host "Expected artifact name: DubVI_${Version}_x64-setup.exe"
-    exit 1
+if (-not (Test-Path "node_modules")) {
+    cmd /c "npm install"
+    if ($LASTEXITCODE -ne 0) { throw "npm install failed" }
 }
-
-$finalName = "DubVI_${Version}_x64-setup.exe"
-$finalPath = Join-Path $Release $finalName
-Copy-Item -Force $setup.FullName $finalPath
-
-$hash = (Get-FileHash -Algorithm SHA256 -Path $finalPath).Hash.ToLower()
-$checksumPath = "$finalPath.sha256"
-Set-Content -Path $checksumPath -Value "$hash  $finalName" -Encoding ascii
-
-Write-Host "[OK] $finalPath"
-Write-Host "[OK] $checksumPath"
-Write-Host "SHA256: $hash"
+cmd /c "npm run tauri build"
+if ($LASTEXITCODE -ne 0) { throw "tauri build failed (exit $LASTEXITCODE)" }
+& (Join-Path $PSScriptRoot "publish-installer.ps1")

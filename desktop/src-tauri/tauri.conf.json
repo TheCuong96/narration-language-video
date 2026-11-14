@@ -40,10 +40,8 @@
     ],
     "resources": [
       "resources/bin/ffmpeg.exe",
-      "resources/bin/ffprobe.exe"
-    ],
-    "externalBin": [
-      "binaries/DubVIEngine"
+      "resources/bin/ffprobe.exe",
+      "resources/engine"
     ],
     "windows": {
       "nsis": {

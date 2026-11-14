@@ -1,4 +1,5 @@
 mod engine;
+mod media_scan;
 
 use engine::{EngineState, JobOptions};
 use serde_json::Value;
@@ -12,6 +13,12 @@ async fn pick_videos(app: AppHandle) -> Result<Vec<String>, String> {
         .dialog()
         .file()
         .add_filter("Video", &["mp4", "mkv", "mov", "avi", "webm"])
+        .add_filter(
+            "Video và phụ đề SRT",
+            &["mp4", "mkv", "mov", "avi", "webm", "srt", "vtt"],
+        )
+        .add_filter("Phụ đề SRT/VTT", &["srt", "vtt"])
+        .add_filter("Tất cả", &["*"])
         .set_title("Chọn video")
         .blocking_pick_files();
     let mut out = Vec::new();
@@ -23,6 +30,22 @@ async fn pick_videos(app: AppHandle) -> Result<Vec<String>, String> {
         }
     }
     Ok(out)
+}
+
+#[tauri::command]
+async fn pick_input_folder(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let dir = app
+        .dialog()
+        .file()
+        .set_title("Chọn thư mục chứa video")
+        .blocking_pick_folder();
+    Ok(dir.and_then(|d| d.into_path().ok().map(|p| p.to_string_lossy().to_string())))
+}
+
+#[tauri::command]
+async fn expand_and_match_media(paths: Vec<String>) -> Result<media_scan::MediaScan, String> {
+    Ok(media_scan::expand_and_match(&paths))
 }
 
 #[tauri::command]
@@ -62,6 +85,12 @@ async fn pick_speaker_wav(app: AppHandle) -> Result<Option<String>, String> {
 #[tauri::command]
 async fn list_xtts_speakers() -> Result<Value, String> {
     engine::run_engine_json(&["list-xtts-speakers"]).await
+}
+
+#[tauri::command]
+async fn open_ollama_download(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().open_url("https://ollama.com/download", None::<&str>).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -156,6 +185,13 @@ async fn url_help() -> Result<Value, String> {
 }
 
 #[tauri::command]
+async fn get_engine_status(
+    state: State<'_, Mutex<EngineState>>,
+) -> Result<engine::EngineStatus, String> {
+    engine::get_engine_status(state).await
+}
+
+#[tauri::command]
 async fn start_job(
     app: AppHandle,
     state: State<'_, Mutex<EngineState>>,
@@ -192,6 +228,11 @@ async fn resume_job(
 #[tauri::command]
 async fn get_queue(job_id: String) -> Result<Value, String> {
     engine::run_engine_json(&["queue", "--job-id", &job_id]).await
+}
+
+#[tauri::command]
+async fn enqueue_videos(job_id: String, files: Vec<String>) -> Result<Value, String> {
+    engine::enqueue_videos(job_id, files).await
 }
 
 #[tauri::command]
@@ -232,7 +273,7 @@ async fn delete_model(model_id: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn get_settings() -> Result<Value, String> {
-    engine::run_engine_json(&["settings-get"]).await
+    engine::get_settings().await
 }
 
 #[tauri::command]
@@ -257,22 +298,35 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .manage(Mutex::new(EngineState::default()))
+        .setup(|_app| {
+            // Older onefile builds left %TEMP%\_MEI* (~1GB each) after force-kill.
+            let n = engine::cleanup_orphan_mei_dirs();
+            if n > 0 {
+                eprintln!("Dub VI: removed {n} orphan PyInstaller temp folder(s)");
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             pick_videos,
+            pick_input_folder,
+            expand_and_match_media,
             pick_output_dir,
             pick_download_dir,
             pick_speaker_wav,
             open_folder,
+            open_ollama_download,
             probe_videos,
             cut_segment,
             probe_url,
             download_url,
             url_help,
+            get_engine_status,
             start_job,
             cancel_job,
             retry_failed,
             resume_job,
             get_queue,
+            enqueue_videos,
             review_get,
             review_set,
             continue_after_review,

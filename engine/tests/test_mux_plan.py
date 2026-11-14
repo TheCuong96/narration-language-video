@@ -41,3 +41,38 @@ def test_plan_mux_copy_for_h264_mp4(tmp_path: Path):
     plan = plan_mux(src, tmp_path / "out.mp4", AudioMode.VI_ONLY)
     assert plan.video_codec_copy is True
     assert plan.reencode_video is False
+
+
+def test_plan_mux_av1_allows_copy_to_mp4(tmp_path: Path):
+    from dubvi.ffmpeg import ffmpeg_path, plan_mux, run_ffmpeg
+
+    src = tmp_path / "v_av1.mp4"
+    try:
+        run_ffmpeg(
+            [
+                ffmpeg_path(),
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=320x240:d=0.5",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=44100:cl=mono",
+                "-t",
+                "0.5",
+                "-c:v",
+                "libaom-av1",
+                "-c:a",
+                "aac",
+                "-shortest",
+                str(src),
+            ]
+        )
+    except Exception:
+        pytest.skip("libaom-av1 encoder not available")
+
+    plan = plan_mux(src, tmp_path / "out.mp4", AudioMode.VI_ONLY)
+    assert plan.reencode_video is False
+    assert "remux" in plan.reason.lower() or "sao chép" in plan.reason.lower()

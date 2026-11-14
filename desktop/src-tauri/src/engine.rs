@@ -20,6 +20,8 @@ pub struct JobOptions {
     pub output_dir: String,
     pub voice: String,
     pub model: String,
+    #[serde(default = "default_source_lang")]
+    pub source_lang: String,
     pub audio_mode: String,
     pub mix_db: f64,
     pub review: bool,
@@ -31,6 +33,18 @@ pub struct JobOptions {
     pub tts_provider: String,
     #[serde(default)]
     pub xtts_speaker_wav: String,
+    #[serde(default)]
+    pub translate_concurrency: u32,
+    #[serde(default)]
+    pub translate_fallback_online: bool,
+    #[serde(default)]
+    pub tts_concurrency: u32,
+    #[serde(default)]
+    pub tts_max_concurrency: u32,
+    #[serde(default)]
+    pub use_existing_subtitles: bool,
+    #[serde(default)]
+    pub subtitle_files: Vec<String>,
 }
 
 fn default_translate_provider() -> String {
@@ -39,6 +53,10 @@ fn default_translate_provider() -> String {
 
 fn default_tts_provider() -> String {
     "edge-tts".into()
+}
+
+fn default_source_lang() -> String {
+    "en".into()
 }
 
 fn repo_engine_dir() -> PathBuf {
@@ -62,27 +80,92 @@ fn is_cargo_target_exe() -> bool {
         .unwrap_or(false)
 }
 
+/// Locate the onedir PyInstaller sidecar (exe + `_internal`), never a onefile stub.
+fn resolve_sidecar_exe() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.extend([
+                dir.join("engine").join("DubVIEngine.exe"),
+                dir.join("resources").join("engine").join("DubVIEngine.exe"),
+                // Legacy onefile next to app (older installs) — still works but creates _MEI*
+                dir.join("DubVIEngine.exe"),
+            ]);
+        }
+    }
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    candidates.push(
+        manifest
+            .join("resources")
+            .join("engine")
+            .join("DubVIEngine.exe"),
+    );
+    candidates.into_iter().find(|p| p.is_file())
+}
+
 pub fn engine_command() -> (PathBuf, Vec<String>) {
     if let Ok(p) = std::env::var("DUBVI_ENGINE") {
         return (PathBuf::from(p), vec![]);
     }
     // During `tauri dev` / cargo runs, prefer live Python so engine source edits apply
-    // without rebuilding the stale PyInstaller sidecar next to dubvi.exe.
+    // without rebuilding the stale PyInstaller sidecar.
     let engine_pkg = repo_engine_dir().join("dubvi").join("__init__.py");
     if is_cargo_target_exe() && engine_pkg.is_file() {
         let py = which_python();
         return (py, vec!["-u".into(), "-m".into(), "dubvi".into()]);
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let side = dir.join("DubVIEngine.exe");
-            if side.is_file() {
-                return (side, vec![]);
-            }
-        }
+    if let Some(side) = resolve_sidecar_exe() {
+        return (side, vec![]);
     }
     let py = which_python();
     (py, vec!["-u".into(), "-m".into(), "dubvi".into()])
+}
+
+fn engine_workdir(bin: &std::path::Path) -> PathBuf {
+    let name = bin
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if name == "dubviengine.exe" || name == "dubviengine" {
+        if let Some(parent) = bin.parent() {
+            return parent.to_path_buf();
+        }
+    }
+    let src = repo_engine_dir();
+    if src.is_dir() {
+        return src;
+    }
+    bin.parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Delete orphan PyInstaller `%TEMP%\_MEI*` folders (leftover from onefile / force-kill).
+pub fn cleanup_orphan_mei_dirs() -> u32 {
+    let temp = std::env::temp_dir();
+    let Ok(entries) = std::fs::read_dir(&temp) else {
+        return 0;
+    };
+    let mut removed = 0u32;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("_MEI") {
+            continue;
+        }
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => removed += 1,
+            Err(_) => {
+                // In use by a live process — skip.
+            }
+        }
+    }
+    removed
 }
 
 fn which_python() -> PathBuf {
@@ -127,12 +210,59 @@ fn emit_line(app: &AppHandle, line: &str) {
     }
 }
 
+fn pid_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        let out = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output();
+        match out {
+            Ok(o) => {
+                let s = String::from_utf8_lossy(&o.stdout);
+                s.contains(&pid.to_string())
+            }
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let out = Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        matches!(out, Ok(st) if st.success())
+    }
+}
+
+/// Kill any previously tracked engine so F5 → Start does not orphan GPU processes.
+fn kill_previous_engine(state: &Arc<Mutex<EngineState>>) {
+    let prev = match state.lock() {
+        Ok(mut st) => st.child_pid.take(),
+        Err(_) => None,
+    };
+    if let Some(pid) = prev {
+        if pid_alive(pid) {
+            kill_pid(pid);
+            // Give the driver a moment to release VRAM before the next CUDA load.
+            thread::sleep(std::time::Duration::from_millis(400));
+        }
+    }
+}
+
 fn spawn_streaming(
     app: AppHandle,
     state: Arc<Mutex<EngineState>>,
     args: Vec<String>,
     job_id: String,
 ) -> Result<(), String> {
+    // Always replace the previous child — UI refresh loses React state but Rust
+    // EngineState (and a live Python process) can survive. Overwriting child_pid
+    // without kill left orphans holding VRAM; later jobs then fall back to CPU.
+    kill_previous_engine(&state);
+
     let (bin, prefix) = engine_command();
     let mut env = spawn_env();
     // Point engine at bundled FFmpeg from Tauri resources when present
@@ -152,17 +282,8 @@ fn spawn_streaming(
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
         .env_clear()
-        .envs(env);
-    // Prefer live engine source in cargo builds; otherwise stay next to the app
-    // (CARGO_MANIFEST_DIR is baked at compile time and may not exist when installed).
-    let engine_src = repo_engine_dir();
-    if engine_src.is_dir() {
-        cmd.current_dir(&engine_src);
-    } else if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            cmd.current_dir(dir);
-        }
-    }
+        .envs(env)
+        .current_dir(engine_workdir(&bin));
 
     #[cfg(windows)]
     {
@@ -207,6 +328,8 @@ fn spawn_streaming(
                 st.current_job_id = None;
             }
         }
+        // Force-kill / crash can leave onefile _MEI* behind — scavenge after exit.
+        let _ = cleanup_orphan_mei_dirs();
         let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
         let _ = app_done.emit(
             "engine-event",
@@ -235,11 +358,81 @@ fn state_arc(state: &State<'_, Mutex<EngineState>>) -> Result<Arc<Mutex<EngineSt
     let shared = SHARED.get_or_init(|| Arc::new(Mutex::new(EngineState::default())));
     if let Ok(src) = state.lock() {
         if let Ok(mut dst) = shared.lock() {
-            dst.current_job_id = src.current_job_id.clone();
-            dst.child_pid = src.child_pid;
+            // SHARED is authoritative for the live child (wait-thread clears it on exit).
+            // Never clobber a live shared pid with a stale managed copy after F5/sync races.
+            if dst.current_job_id.is_none() {
+                dst.current_job_id = src.current_job_id.clone();
+            }
+            if dst.child_pid.is_none() {
+                dst.child_pid = src.child_pid;
+            }
         }
     }
     Ok(Arc::clone(shared))
+}
+
+/// Snapshot of the engine child tracked by this app window/process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineStatus {
+    pub job_id: Option<String>,
+    pub child_pid: Option<u32>,
+    pub running: bool,
+    /// Other DubVIEngine processes visible on the machine (multi-window / orphans).
+    pub peer_engine_count: u32,
+}
+
+fn count_peer_engines() -> u32 {
+    #[cfg(windows)]
+    {
+        let out = Command::new("tasklist")
+            .args(["/FI", "IMAGENAME eq DubVIEngine.exe", "/NH"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output();
+        match out {
+            Ok(o) => String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| l.to_ascii_lowercase().contains("dubviengine.exe"))
+                .count() as u32,
+            Err(_) => 0,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        0
+    }
+}
+
+pub async fn get_engine_status(
+    state: State<'_, Mutex<EngineState>>,
+) -> Result<EngineStatus, String> {
+    let shared = state_arc(&state)?;
+    let (job_id, child_pid) = {
+        let st = shared.lock().map_err(|e| e.to_string())?;
+        (st.current_job_id.clone(), st.child_pid)
+    };
+    let running = child_pid.map(pid_alive).unwrap_or(false);
+    if !running {
+        if let Ok(mut st) = shared.lock() {
+            st.child_pid = None;
+            if job_id.is_some() && st.current_job_id == job_id {
+                // Keep job_id so UI can still resume from disk; only clear live pid.
+            }
+        }
+        if let Ok(mut st) = state.lock() {
+            st.child_pid = None;
+        }
+    } else if let Ok(mut st) = state.lock() {
+        st.child_pid = child_pid;
+        st.current_job_id = job_id.clone();
+    }
+    Ok(EngineStatus {
+        job_id,
+        child_pid: if running { child_pid } else { None },
+        running,
+        peer_engine_count: count_peer_engines(),
+    })
 }
 
 pub async fn start_job(
@@ -258,6 +451,8 @@ pub async fn start_job(
         options.voice,
         "--model".into(),
         options.model,
+        "--source-lang".into(),
+        options.source_lang,
         "--audio-mode".into(),
         options.audio_mode,
         "--mix-db".into(),
@@ -290,22 +485,45 @@ pub async fn start_job(
         args.push("--xtts-speaker".into());
         args.push(options.xtts_speaker_wav);
     }
+    if options.translate_concurrency > 32 {
+        return Err("Kích thước batch dịch phải từ 0 đến 32".into());
+    }
+    args.push("--translate-concurrency".into());
+    args.push(options.translate_concurrency.to_string());
+    args.push(if options.translate_fallback_online { "--translate-fallback-online" } else { "--no-translate-fallback-online" }.into());
+    if options.tts_concurrency > 0 {
+        args.push("--tts-concurrency".into());
+        args.push(options.tts_concurrency.to_string());
+    }
+    if options.tts_max_concurrency > 0 {
+        args.push("--tts-max-concurrency".into());
+        args.push(options.tts_max_concurrency.to_string());
+    }
+    if options.use_existing_subtitles {
+        args.push("--use-subtitles".into());
+    }
+    if !options.subtitle_files.is_empty() {
+        args.push("--subtitles".into());
+        args.extend(options.subtitle_files);
+    }
 
     {
         let mut st = state.lock().map_err(|e| e.to_string())?;
         st.current_job_id = Some(job_id.clone());
+        // Keep child_pid so state_arc can merge it into SHARED; spawn kills it first.
     }
     let shared = state_arc(&state)?;
     spawn_streaming(app, shared.clone(), args, job_id.clone())?;
     if let Ok(g) = shared.lock() {
         if let Ok(mut st) = state.lock() {
             st.child_pid = g.child_pid;
+            st.current_job_id = g.current_job_id.clone();
         }
     }
     Ok(job_id)
 }
 
-fn write_cancel_flag(job_id: &str) -> Result<(), String> {
+fn appdata_root() -> PathBuf {
     let base = if cfg!(windows) {
         std::env::var("LOCALAPPDATA").unwrap_or_else(|_| {
             format!(
@@ -319,7 +537,61 @@ fn write_cancel_flag(job_id: &str) -> Result<(), String> {
             std::env::var("HOME").unwrap_or_else(|_| ".".into())
         )
     };
-    let dir = PathBuf::from(base).join("DubVI").join("jobs").join(job_id);
+    PathBuf::from(base).join("DubVI")
+}
+
+fn settings_path() -> PathBuf {
+    appdata_root().join("settings.json")
+}
+
+fn default_settings_json() -> Value {
+    serde_json::json!({
+        "whisper_model": "small",
+        "device_mode": "cpu",
+        "default_output_dir": "",
+        "default_download_dir": "",
+        "cleanup_temps": true,
+        "mix_original_db": -18.0,
+        "voice": "vi-VN-HoaiMyNeural",
+        "audio_mode": "vi_only",
+        "review_by_default": false,
+        "force_rerun": false,
+        "source_lang": "en",
+        "use_existing_subtitles": false,
+        "translate_provider": "deep-translator",
+        "tts_provider": "edge-tts",
+        "xtts_speaker_wav": "",
+        "translate_concurrency": 0,
+        "translate_fallback_online": false,
+        "tts_concurrency": 0,
+        "tts_max_concurrency": 0,
+    })
+}
+
+/// Read `%LOCALAPPDATA%/DubVI/settings.json` without spawning the Python engine.
+pub fn load_settings() -> Result<Value, String> {
+    let mut out = default_settings_json();
+    let path = settings_path();
+    if !path.is_file() {
+        return Ok(out);
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("read settings: {e}"))?;
+    if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&text) {
+        if let Value::Object(ref mut base) = out {
+            for (k, v) in map {
+                base.insert(k, v);
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub async fn get_settings() -> Result<Value, String> {
+    load_settings()
+}
+
+fn write_cancel_flag(job_id: &str) -> Result<(), String> {
+    let dir = appdata_root().join("jobs").join(job_id);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("cancel.flag"), "1").map_err(|e| e.to_string())?;
     Ok(())
@@ -370,6 +642,8 @@ pub async fn cancel_job(state: State<'_, Mutex<EngineState>>, job_id: String) ->
             st.current_job_id = None;
         }
     }
+    // taskkill /F skips PyInstaller bootloader cleanup — scavenge _MEI* now.
+    let _ = cleanup_orphan_mei_dirs();
     Ok(())
 }
 
@@ -462,6 +736,32 @@ pub async fn run_engine_json(args: &[&str]) -> Result<Value, String> {
     serde_json::from_str(&out).map_err(|e| format!("JSON parse: {e}; out={out}"))
 }
 
+/// Append videos to a live job queue so they process after the current file.
+pub async fn enqueue_videos(job_id: String, files: Vec<String>) -> Result<Value, String> {
+    if files.is_empty() {
+        return Err("Không có video để thêm vào hàng đợi".into());
+    }
+    let mut args: Vec<String> = vec![
+        "queue-add".into(),
+        "--job-id".into(),
+        job_id,
+        "--files".into(),
+    ];
+    args.extend(files);
+    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let out = run_engine_capture(&refs)?;
+    let value: Value =
+        serde_json::from_str(&out).map_err(|e| format!("JSON parse: {e}; out={out}"))?;
+    if value.get("error").is_some() {
+        let msg = value
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("Không thêm được video vào hàng đợi");
+        return Err(msg.to_string());
+    }
+    Ok(value)
+}
+
 pub async fn download_model(
     app: AppHandle,
     state: State<'_, Mutex<EngineState>>,
@@ -500,16 +800,22 @@ pub async fn download_url(
     Ok(job_id)
 }
 
+/// Merge + write `%LOCALAPPDATA%/DubVI/settings.json` without spawning the engine.
 pub async fn save_settings(settings: Value) -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("dubvi-settings-{}.json", uuid::Uuid::new_v4()));
-    {
-        let mut f = std::fs::File::create(&dir).map_err(|e| e.to_string())?;
-        f.write_all(settings.to_string().as_bytes())
-            .map_err(|e| e.to_string())?;
+    let mut cur = load_settings()?;
+    if let (Value::Object(ref mut base), Value::Object(patch)) = (&mut cur, settings) {
+        for (k, v) in patch {
+            base.insert(k, v);
+        }
+    } else {
+        return Err("settings payload must be a JSON object".into());
     }
-    let path = dir.to_string_lossy().to_string();
-    let _ = run_engine_capture(&["settings-set", "--file", &path])?;
-    let _ = std::fs::remove_file(dir);
+    let path = settings_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create settings dir: {e}"))?;
+    }
+    let text = serde_json::to_string_pretty(&cur).map_err(|e| format!("serialize settings: {e}"))?;
+    std::fs::write(&path, text).map_err(|e| format!("write settings: {e}"))?;
     Ok(())
 }
 
@@ -522,7 +828,7 @@ pub fn run_engine_capture(args: &[&str]) -> Result<String, String> {
         .stderr(Stdio::piped())
         .env_clear()
         .envs(spawn_env())
-        .current_dir(repo_engine_dir());
+        .current_dir(engine_workdir(&bin));
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -530,8 +836,19 @@ pub fn run_engine_capture(args: &[&str]) -> Result<String, String> {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     let output = cmd.output().map_err(|e| e.to_string())?;
+    // Short-lived onefile spawns often leave _MEI*; reclaim after capture.
+    let _ = cleanup_orphan_mei_dirs();
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     if !output.status.success() {
+        // Doctor deliberately exits nonzero for failed checks. Its JSON report
+        // still needs to reach Settings so users can see the repair guidance.
+        if args.first() == Some(&"doctor") {
+            if let Ok(report) = serde_json::from_str::<Value>(&stdout) {
+                if report.get("checks").and_then(Value::as_array).is_some() {
+                    return Ok(stdout);
+                }
+            }
+        }
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("engine failed: {stderr} {stdout}"));
     }

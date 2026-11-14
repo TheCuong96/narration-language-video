@@ -263,7 +263,8 @@ async def tts_segment(text: str, out_mp3: Path, voice: str, rate: str = "+0%") -
 
 
 def stretch_to_duration(src: Path, dst: Path, target_sec: float) -> None:
-    """Fit audio into target_sec using atempo + pad/trim."""
+    """Fit one complete sentence; keep 1× unless its total duration is too long."""
+    target = max(float(target_sec), 0.05)
     dur = ffprobe_duration(src)
     if dur <= 0:
         run(
@@ -275,7 +276,7 @@ def stretch_to_duration(src: Path, dst: Path, target_sec: float) -> None:
                 "-i",
                 "anullsrc=r=24000:cl=mono",
                 "-t",
-                f"{max(target_sec, 0.05):.3f}",
+                f"{target:.3f}",
                 "-c:a",
                 "pcm_s16le",
                 str(dst),
@@ -285,20 +286,20 @@ def stretch_to_duration(src: Path, dst: Path, target_sec: float) -> None:
         )
         return
 
-    usable = max(target_sec * 0.95, 0.05)
-    # atempo: output_dur = input_dur / atempo
     filters: list[str] = []
-    tempo = dur / usable if usable > 0 else 1.0
-    tempo = max(0.85, min(tempo, 1.55))
-    t = tempo
-    while t < 0.5:
-        filters.append("atempo=0.5")
-        t /= 0.5
-    while t > 2.0:
-        filters.append("atempo=2.0")
-        t /= 2.0
-    filters.append(f"atempo={t:.4f}")
-    af = ",".join(filters) + f",apad=whole_dur={target_sec:.3f},atrim=0:{target_sec:.3f}"
+    if dur > target:
+        # Calculate one ratio from the full sentence and apply it uniformly.
+        # Stacking atempo avoids a ceiling that would otherwise force atrim to
+        # discard the final words of very long sentences.
+        tempo = dur / target
+        t = tempo
+        while t > 2.0:
+            filters.append("atempo=2.0")
+            t /= 2.0
+        filters.append(f"atempo={t:.4f}")
+
+    timing_filter = f"apad=whole_dur={target:.3f},atrim=0:{target:.3f}"
+    af = ",".join([*filters, timing_filter])
     run(
         [
             "ffmpeg",
@@ -323,12 +324,14 @@ def stretch_to_duration(src: Path, dst: Path, target_sec: float) -> None:
 async def build_narration(
     segments: list[dict], work: Path, video_duration: float, voice: str
 ) -> Path:
-    seg_dir = work / "segments"
+    # Versioned caches prevent older retry rates / tail-trimmed files from
+    # being silently reused after the sentence-speed policy changed.
+    seg_dir = work / "segments_sentence_v2"
     seg_dir.mkdir(parents=True, exist_ok=True)
-    fitted_dir = work / "fitted"
+    fitted_dir = work / "fitted_sentence_v2"
     fitted_dir.mkdir(parents=True, exist_ok=True)
 
-    narration = work / "narration.wav"
+    narration = work / "narration_sentence_v2.wav"
     if narration.exists():
         return narration
 
@@ -343,8 +346,9 @@ async def build_narration(
             ok = False
             for attempt in range(4):
                 try:
-                    rate = "+0%" if attempt == 0 else ("-5%" if attempt == 1 else "+5%")
-                    await tts_segment(text, mp3, voice=voice, rate=rate)
+                    # A retry only retries transport/provider work. It must not
+                    # choose a different speaking rate before duration is known.
+                    await tts_segment(text, mp3, voice=voice, rate="+0%")
                     if mp3.exists() and mp3.stat().st_size >= 500:
                         ok = True
                         break
@@ -362,12 +366,26 @@ async def build_narration(
 
     pieces: list[Path] = []
     cursor = 0.0
-    for idx, s in enumerate(segments):
+    ordered = sorted(
+        segments,
+        key=lambda s: (float(s["start"]), float(s["end"]), int(s["id"])),
+    )
+    for idx, s in enumerate(ordered):
         start = float(s["start"])
         end = float(s["end"])
         if end <= start:
             end = start + 0.3
-        gap = start - cursor
+        if idx + 1 < len(ordered):
+            deadline = float(ordered[idx + 1]["start"])
+        elif video_duration > start + 0.05:
+            deadline = video_duration
+        else:
+            deadline = end
+
+        play_start = max(start, cursor)
+        play_end = max(deadline, play_start + 0.2)
+        target = play_end - play_start
+        gap = play_start - cursor
         if gap > 0.02:
             sil = fitted_dir / f"sil_{idx:04d}.wav"
             if not sil.exists():
@@ -389,10 +407,10 @@ async def build_narration(
                     stderr=subprocess.DEVNULL,
                 )
             pieces.append(sil)
+            cursor = play_start
 
         mp3 = seg_dir / f"{s['id']:04d}.mp3"
         fitted = fitted_dir / f"{s['id']:04d}.wav"
-        target = max(end - start, 0.2)
         if mp3.exists():
             if not fitted.exists():
                 stretch_to_duration(mp3, fitted, target)
@@ -417,7 +435,7 @@ async def build_narration(
                     stderr=subprocess.DEVNULL,
                 )
             pieces.append(fitted)
-        cursor = end
+        cursor = play_end
 
     if cursor < video_duration - 0.05:
         sil = fitted_dir / "sil_end.wav"
@@ -509,13 +527,19 @@ def process_one(video: Path, model, cfg: Config) -> Path:
         for p in [
             work / "transcript_vi.json",
             work / "script_vi.txt",
+            work / "narration_sentence_v2.wav",
             work / "narration.wav",
             work / "concat.txt",
             output,
         ]:
             if p.exists():
                 p.unlink()
-        for dname in ("fitted", "segments"):
+        for dname in (
+            "fitted_sentence_v2",
+            "segments_sentence_v2",
+            "fitted",
+            "segments",
+        ):
             d = work / dname
             if d.exists():
                 for f in d.glob("*"):

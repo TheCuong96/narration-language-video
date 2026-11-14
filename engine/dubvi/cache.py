@@ -16,10 +16,18 @@ TRANSCRIPT_EN = "transcript_en.json"
 TRANSCRIPT_VI = "transcript_vi.json"
 SCRIPT_VI = "script_vi.txt"
 AUDIO_FLAC = "audio.flac"
-NARRATION = "narration.wav"
-SEGMENTS_DIR = "segments"
-# Soft-tempo aligner output (invalidates older 1.55× "fitted/" cache)
-FITTED_DIR = "fitted_soft"
+# Cache v2 guarantees that source TTS is always generated at +0% and that any
+# required tempo is applied uniformly to one complete sentence during align.
+# New names intentionally invalidate MP3/WAV files produced by older rules.
+NARRATION = "narration_sentence_v2.wav"
+SEGMENTS_DIR = "segments_sentence_v2"
+FITTED_DIR = "fitted_sentence_v2"
+CHUNKS_DIR = "chunks"
+# Source re-stamped at constant fps when its video PTS were stretched vs audio.
+RETIMED_SOURCE = "source_retimed.mp4"
+_LEGACY_NARRATION = ("narration_1x.wav", "narration_slot.wav", "narration.wav")
+_LEGACY_SEGMENTS = ("segments",)
+_LEGACY_FITTED = ("fitted_1x", "fitted_slot", "fitted_soft", "fitted")
 
 
 def save_json(path: Path, data: Any) -> None:
@@ -39,6 +47,23 @@ def save_segments(path: Path, segments: list[Segment]) -> None:
     save_json(path, [s.to_dict() for s in segments])
 
 
+def translation_metadata_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".meta.json")
+
+
+def save_translation_segments(path: Path, segments: list[Segment], fingerprint: str) -> None:
+    """Fail closed if interrupted between the two atomic file replacements.
+
+    Keep the transcript array compatible with review and older readers. Remove
+    the previous stamp before changing translations so a crash cannot label
+    new provider output with the previous provider's fingerprint.
+    """
+    metadata_path = translation_metadata_path(path)
+    save_json(metadata_path, {})
+    save_segments(path, segments)
+    save_json(metadata_path, {"translation_fingerprint": fingerprint})
+
+
 def load_segments(path: Path) -> list[Segment] | None:
     raw = load_json(path)
     if raw is None:
@@ -48,7 +73,7 @@ def load_segments(path: Path) -> list[Segment] | None:
 
 def clear_downstream(work: Path, *, keep_en: bool = True) -> None:
     """Clear caches that depend on later stages (for --force)."""
-    for name in (TRANSCRIPT_VI, SCRIPT_VI, NARRATION, "concat.txt"):
+    for name in (TRANSCRIPT_VI, TRANSCRIPT_VI + ".meta.json", SCRIPT_VI, NARRATION, "concat.txt", *_LEGACY_NARRATION):
         p = work / name
         if p.exists():
             p.unlink()
@@ -59,7 +84,12 @@ def clear_downstream(work: Path, *, keep_en: bool = True) -> None:
         audio = work / AUDIO_FLAC
         if audio.exists():
             audio.unlink()
-    for dname in (FITTED_DIR, SEGMENTS_DIR):
+    for dname in (
+        FITTED_DIR,
+        SEGMENTS_DIR,
+        *_LEGACY_FITTED,
+        *_LEGACY_SEGMENTS,
+    ):
         d = work / dname
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)
@@ -70,14 +100,19 @@ def cleanup_temps_after_success(work: Path, *, keep_transcripts: bool = True) ->
     After successful mux: remove bulky temps, keep transcripts for re-run insight.
     On failure the caller must NOT call this.
     """
-    for name in (AUDIO_FLAC, NARRATION, "concat.txt"):
+    for name in (AUDIO_FLAC, NARRATION, RETIMED_SOURCE, "concat.txt", *_LEGACY_NARRATION):
         p = work / name
         if p.exists():
             try:
                 p.unlink()
             except OSError as e:
                 log.warning("cleanup %s: %s", p, e)
-    for dname in (FITTED_DIR, SEGMENTS_DIR):
+    for dname in (
+        FITTED_DIR,
+        SEGMENTS_DIR,
+        *_LEGACY_FITTED,
+        *_LEGACY_SEGMENTS,
+    ):
         d = work / dname
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)

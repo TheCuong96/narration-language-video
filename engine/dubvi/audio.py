@@ -1,4 +1,4 @@
-"""Audio extract + narration timeline (gap-borrow + mild tempo)."""
+"""Audio extract + narration timeline (strict slot fit to original timestamps)."""
 
 from __future__ import annotations
 
@@ -8,11 +8,14 @@ from . import cache, events
 from .ffmpeg import (
     concat_wavs,
     extract_audio_flac,
-    fit_audio_to_duration,
     make_silence,
     mux_video,
+    pad_or_trim_audio,
+    probe_av_timing,
     probe_duration,
+    retime_video_cfr,
     stretch_to_duration,
+    stretched_video_fps,
 )
 from .jobs import CancellationToken
 from .models import AudioMode, Segment, Stage
@@ -20,11 +23,57 @@ from .system_info import get_logger
 
 log = get_logger("dubvi.audio")
 
-# Mild speed-up only after silence has been borrowed. 1.20 ≈ +20% (was 1.55).
-MAX_TEMPO = 1.20
-MIN_TEMPO = 0.90
-# Keep a little pause between phrases when reclaiming silence.
-MIN_GAP = 0.05
+# Never slow speech down. Default is 1×; speed up only when the next line (or
+# the end of the video) would be overlapped.
+MIN_TEMPO = 1.0
+# Legacy spill-mode ceiling. Strict sentence fitting is uncapped so content is
+# never discarded; FFmpeg stacks atempo filters for ratios above 2×.
+MAX_TEMPO = 8.0
+
+
+def media_source(video: Path, work: Path) -> Path:
+    """The file to time/mux against: the retimed copy if one was made, else the input."""
+    retimed = work / cache.RETIMED_SOURCE
+    if retimed.exists() and retimed.stat().st_size > 0:
+        return retimed
+    return video
+
+
+def normalize_source(video: Path, work: Path, tracker=None) -> Path:
+    """
+    Retime sources whose video timestamps are stretched relative to the audio.
+
+    Without this the narration (timed to the speech) ends at ~2/3 of the video
+    and the rest of the output is silent, with slides out of sync.
+    """
+    current = media_source(video, work)
+    if current != video:
+        events.log("Dùng cache video đã sửa timeline")
+        return current
+    timing = probe_av_timing(video)
+    fps = stretched_video_fps(timing) if timing else None
+    if not fps:
+        return video
+
+    events.log(
+        f"Video nguồn lệch tiếng: hình {timing.video_sec:.1f}s nhưng tiếng {timing.audio_sec:.1f}s "
+        f"({timing.frames} khung @ {fps:g}fps) — đang sửa timeline video"
+    )
+
+    def _on_progress(frac: float) -> None:
+        if tracker:
+            pct = int(round(frac * 100))
+            tracker.emit(pct, 100, f"Sửa timeline video… {pct}%", force_frac=frac)
+
+    retimed = work / cache.RETIMED_SOURCE
+    retime_video_cfr(
+        video,
+        retimed,
+        fps,
+        duration_sec=timing.audio_sec,
+        on_progress=_on_progress,
+    )
+    return retimed
 
 
 def extract_for_whisper(video: Path, work: Path, tracker=None) -> Path:
@@ -43,7 +92,7 @@ def extract_for_whisper(video: Path, work: Path, tracker=None) -> Path:
 
 
 def _segment_windows(segments: list[Segment]) -> list[tuple[int, float, float]]:
-    """Return (id, start, end) with sane minimum lengths."""
+    """Return (id, start, end) with sane minimum lengths, in time order."""
     out: list[tuple[int, float, float]] = []
     for s in segments:
         start = float(s.start)
@@ -51,83 +100,45 @@ def _segment_windows(segments: list[Segment]) -> list[tuple[int, float, float]]:
         if end <= start:
             end = start + 0.3
         out.append((s.id, start, end))
+    out.sort(key=lambda w: (w[1], w[2], w[0]))
+    return out
+
+
+def _play_deadlines(segments: list[Segment], video_duration: float) -> dict[int, float]:
+    """Latest time each line may occupy at 1×: next line's start, or video end."""
+    wins = _segment_windows(segments)
+    out: dict[int, float] = {}
+    for i, (sid, start, end) in enumerate(wins):
+        if i + 1 < len(wins):
+            deadline = wins[i + 1][1]
+        elif video_duration > start + 0.05:
+            deadline = video_duration
+        else:
+            deadline = end
+        out[sid] = max(deadline, start + 0.2)
     return out
 
 
 def allocate_speech_targets(
     segments: list[Segment],
-    natural_durs: dict[int, float],
-    video_duration: float,
+    natural_durs: dict[int, float] | None = None,
+    video_duration: float = 0.0,
     *,
     max_tempo: float = MAX_TEMPO,
-    min_gap: float = MIN_GAP,
+    min_gap: float = 0.0,
 ) -> dict[int, float]:
     """
-    Assign each segment a target play duration.
+    Max play duration per segment at 1× before the next line (or video end).
 
-    Strategy:
-    1. Start from the original EN time slot.
-    2. If TTS is longer, borrow from following silence gaps (keep min_gap).
-    3. Only residual mismatch is left for mild atempo (≤ max_tempo) + spill.
+    Lines still start at the original timestamp. Speech may run past the
+    subtitle/Whisper ``end`` into the following gap; it is only sped up when
+    it would overlap the next line. natural_durs / max_tempo / min_gap are
+    accepted for call-site compatibility.
     """
+    del natural_durs, max_tempo, min_gap
+    deadlines = _play_deadlines(segments, video_duration)
     wins = _segment_windows(segments)
-    if not wins:
-        return {}
-
-    n = len(wins)
-    slots = [max(end - start, 0.2) for _, start, end in wins]
-    natural = [
-        max(float(natural_durs.get(sid, slots[i])), 0.05) for i, (sid, _, _) in enumerate(wins)
-    ]
-
-    # Silence after each segment (before next speech / end of video)
-    gaps_after = [0.0] * n
-    for i in range(n - 1):
-        gaps_after[i] = max(0.0, wins[i + 1][1] - wins[i][2])
-    gaps_after[n - 1] = max(0.0, float(video_duration) - wins[n - 1][2])
-
-    # Borrowable silence (preserve a small pause between phrases)
-    borrowable = [max(0.0, g - min_gap) for g in gaps_after]
-    # Trailing silence can be fully used
-    if n:
-        borrowable[n - 1] = gaps_after[n - 1]
-
-    targets = list(slots)
-
-    for i in range(n):
-        need = natural[i] - targets[i]
-        if need <= 0.02:
-            continue
-        # Prefer immediate following gap, then later gaps
-        for j in range(i, n):
-            if need <= 0.001:
-                break
-            take = min(need, borrowable[j])
-            if take <= 0:
-                continue
-            borrowable[j] -= take
-            targets[i] += take
-            need -= take
-
-    # Anything still longer than target will be handled by mild tempo + spill.
-    # Cap implied tempo hint: expand target to natural/max_tempo when possible
-    # by using leftover borrowable (second pass, proportional leftovers).
-    leftover = sum(borrowable)
-    if leftover > 0.01:
-        soft_deficits = []
-        for i in range(n):
-            min_fit = natural[i] / max(max_tempo, 1.01)
-            soft_deficits.append(max(0.0, min_fit - targets[i]))
-        total_soft = sum(soft_deficits)
-        if total_soft > 0:
-            give = min(leftover, total_soft)
-            for i in range(n):
-                if soft_deficits[i] <= 0:
-                    continue
-                extra = soft_deficits[i] / total_soft * give
-                targets[i] += extra
-
-    return {wins[i][0]: targets[i] for i in range(n)}
+    return {sid: max(deadlines[sid] - start, 0.2) for sid, start, _end in wins}
 
 
 def build_narration(
@@ -140,17 +151,30 @@ def build_narration(
     tracker=None,
 ) -> Path:
     """
-    Build full narration WAV aligned to original timestamps.
+    Build full narration WAV. Each line starts at the original timestamp.
 
-    Prefer natural speaking rate: borrow silence gaps to give long Vietnamese
-    lines more room, then apply only mild atempo (≤ ~1.20×). Remaining overflow
-    still spills into following gaps (no hard trim). If the finished timeline is
-    still longer than the video, speed up the whole narration so nothing is cut
-    off at mux time.
+    - Default tempo is 1× (never slowed to fill a long cue).
+    - TTS may occupy the gap until the next line.
+    - Speed up only when TTS would overlap the next line (or the video end).
     """
     narration = work / cache.NARRATION
     if narration.exists() and narration.stat().st_size > 0:
-        events.log("Dùng cache narration.wav")
+        if tracker:
+            tracker.begin_stage(Stage.ALIGNING, "Kiểm tra narration đã căn giờ trong cache")
+        events.log("Dùng cache narration")
+        narr_dur = probe_duration(narration)
+        if (
+            video_duration > 0.05
+            and narr_dur > 0
+            and abs(narr_dur - video_duration) > 0.01
+        ):
+            events.log(
+                f"Chuẩn hóa đuôi timeline cache ({narr_dur:.2f}s → {video_duration:.2f}s), "
+                "không đổi tốc độ các câu"
+            )
+            pad_or_trim_audio(narration, narration, video_duration)
+        if tracker:
+            tracker.emit(1, 1, "Đã kiểm tra căn giờ từ cache")
         return narration
 
     fitted_dir = work / cache.FITTED_DIR
@@ -160,7 +184,6 @@ def build_narration(
     else:
         events.stage(Stage.ALIGNING, "Đang căn thời gian giọng đọc")
 
-    # Measure natural TTS lengths, then allocate expanded targets from silence
     natural_durs: dict[int, float] = {}
     for s in segments:
         mp3 = mp3_paths.get(s.id)
@@ -170,77 +193,66 @@ def build_narration(
                 natural_durs[s.id] = d
 
     targets = allocate_speech_targets(segments, natural_durs, video_duration)
-    if natural_durs:
-        sped = 0
-        for s in segments:
-            nat = natural_durs.get(s.id)
-            tgt = targets.get(s.id)
-            if nat and tgt and nat > tgt * 1.02:
+    sped = 0
+    kept = 0
+    for s in segments:
+        nat = natural_durs.get(s.id)
+        tgt = targets.get(s.id)
+        if nat and tgt:
+            if nat > tgt:
                 sped += 1
-        events.log(
-            f"Căn giờ mềm: {len(natural_durs)} đoạn TTS, "
-            f"{sped} đoạn cần tăng tốc nhẹ (≤{MAX_TEMPO:.2f}×), còn lại giữ nhịp tự nhiên"
-        )
+            else:
+                kept += 1
+    events.log(
+        f"Căn giờ 1×: {len(natural_durs)} đoạn TTS, "
+        f"{kept} đoạn giữ tốc độ bình thường, "
+        f"{sped} đoạn tăng tốc vì không đủ thời gian đến câu sau"
+    )
 
     pieces: list[Path] = []
     cursor = 0.0
-    spill = 0.0
-    total = len(segments)
+    ordered = sorted(segments, key=lambda s: (float(s.start), float(s.end), s.id))
+    total = len(ordered)
+    deadlines = _play_deadlines(ordered, video_duration)
 
-    for idx, s in enumerate(segments):
+    for idx, s in enumerate(ordered):
         if cancel:
             cancel.check()
 
         start = float(s.start)
-        end = float(s.end)
-        if end <= start:
-            end = start + 0.3
-        slot = max(end - start, 0.2)
-        target = max(targets.get(s.id, slot), 0.2)
+        play_start = max(start, cursor)
+        play_end = max(deadlines.get(s.id, start + 0.3), play_start + 0.2)
+        slot = play_end - play_start
 
-        gap = start - cursor
-        if spill > 0 and gap > 0:
-            used = min(spill, gap)
-            spill -= used
-            cursor += used
-            gap = start - cursor
-
+        gap = play_start - cursor
         if gap > 0.02:
             sil = fitted_dir / f"sil_{idx:04d}.wav"
             if not sil.exists():
                 make_silence(sil, gap)
             pieces.append(sil)
-            cursor = start
+            cursor = play_start
 
         fitted = fitted_dir / f"{s.id:04d}.wav"
         mp3 = mp3_paths.get(s.id)
 
         if mp3 and mp3.exists():
             if not fitted.exists():
-                actual = stretch_to_duration(
+                stretch_to_duration(
                     mp3,
                     fitted,
-                    target,
-                    allow_spill=True,
+                    slot,
+                    allow_spill=False,
                     max_tempo=MAX_TEMPO,
                     min_tempo=MIN_TEMPO,
                     fit_slack=0.0,
                 )
-            else:
-                actual = probe_duration(fitted) or target
             pieces.append(fitted)
-            # Advance by played speech; spill eats the next silence
-            if actual > target + 0.05:
-                spill += actual - target
-                cursor += actual
-            else:
-                # Prefer original end when we fit; if target grew into gap, use played length
-                cursor = max(end, cursor + actual)
         else:
             if not fitted.exists():
-                make_silence(fitted, target)
+                make_silence(fitted, slot)
             pieces.append(fitted)
-            cursor = max(end, cursor + target)
+
+        cursor = play_end
 
         if tracker:
             tracker.emit(idx + 1, max(total, 1), f"Căn thời gian {idx + 1}/{total}")
@@ -254,26 +266,26 @@ def build_narration(
             if not sil.exists():
                 make_silence(sil, rest)
             pieces.append(sil)
+            cursor = video_duration
 
     list_file = work / "concat.txt"
     concat_wavs(pieces, list_file, narration)
 
-    # Final safety net: mux uses -shortest, so a longer narration would lose its
-    # tail. Speed up the full track (never hard-trim speech) to match the video.
+    # Safety: narration must match video length for mux (-shortest). Do not
+    # speed up the complete track here: each sentence has already been fitted
+    # independently, and a global atempo would make later sentences inherit
+    # the previous sentence's speed decision.
     narr_dur = probe_duration(narration)
-    if narr_dur > video_duration + 0.05 and video_duration > 0.05:
-        tempo = narr_dur / video_duration
+    if (
+        video_duration > 0.05
+        and narr_dur > 0
+        and abs(narr_dur - video_duration) > 0.01
+    ):
         events.log(
-            f"Giọng đọc dài hơn video ({narr_dur:.1f}s > {video_duration:.1f}s) — "
-            f"tăng tốc toàn bộ {tempo:.2f}× để giữ đủ nội dung"
+            f"Chuẩn hóa đuôi timeline ({narr_dur:.2f}s → {video_duration:.2f}s), "
+            "không tăng tốc toàn bộ giọng đọc"
         )
-        if tracker:
-            tracker.emit(
-                max(total, 1),
-                max(total, 1),
-                f"Tăng tốc giọng đọc {tempo:.2f}× để khớp video",
-            )
-        fit_audio_to_duration(narration, narration, video_duration)
+        pad_or_trim_audio(narration, narration, video_duration)
 
     if tracker:
         tracker.emit(max(total, 1), max(total, 1), "Đã căn thời gian")
@@ -293,20 +305,37 @@ def mux(
     tracker=None,
 ) -> None:
     mode = audio_mode.value if isinstance(audio_mode, AudioMode) else audio_mode
+    duration = probe_duration(video)
+
+    def _on_mux_progress(frac: float) -> None:
+        pct = max(0, min(100, int(round(frac * 100))))
+        msg = f"FFmpeg đang ghép… {pct}%"
+        if tracker:
+            tracker.emit(pct, 100, msg, force_frac=frac)
+        else:
+            events.progress(Stage.MUXING, pct, 100, msg)
+
     if tracker:
         tracker.begin_stage(Stage.MUXING, f"Đang ghép video ({mode}) → {output.name}")
-        tracker.emit(0, 1, "FFmpeg đang ghép…")
+        tracker.emit(0, 100, "Bắt đầu ghép video…")
     else:
         events.stage(Stage.MUXING, f"Đang ghép video ({mode}) → {output.name}")
-    mux_video(
+
+    plan = mux_video(
         video,
         narration,
         output,
         audio_mode=audio_mode,
         mix_original_db=mix_original_db,
         allow_reencode=allow_reencode,
+        duration_sec=duration,
+        on_progress=_on_mux_progress,
     )
+
+    if plan.reencode_video and duration >= 300 and tracker:
+        events.log("Đã re-encode video — lần sau dùng nguồn H.264/AV1 remux sẽ nhanh hơn")
+
     if tracker:
-        tracker.emit(1, 1, "Ghép xong")
+        tracker.emit(100, 100, "Ghép xong")
     else:
-        events.progress(Stage.MUXING, 1, 1, "Ghép xong")
+        events.progress(Stage.MUXING, 100, 100, "Ghép xong")

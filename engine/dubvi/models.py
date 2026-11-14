@@ -26,6 +26,8 @@ class ErrorCode(str, Enum):
     INVALID_ARGS = "INVALID_ARGS"
     REVIEW_PENDING = "REVIEW_PENDING"
     TRANSLATION_INVALID = "TRANSLATION_INVALID"
+    SUBTITLE_NOT_FOUND = "SUBTITLE_NOT_FOUND"
+    SUBTITLE_INVALID = "SUBTITLE_INVALID"
     UNSUPPORTED_FORMAT = "UNSUPPORTED_FORMAT"
     YTDLP_NOT_FOUND = "YTDLP_NOT_FOUND"
     YTDLP_INVALID_URL = "YTDLP_INVALID_URL"
@@ -175,6 +177,18 @@ class JobConfig:
     translate_provider: str = "deep-translator"
     tts_provider: str = "edge-tts"
     xtts_speaker_wav: str = ""
+    # Long-video chunk pipeline (auto when duration >= chunk_min_duration_sec)
+    enable_chunking: bool = True
+    chunk_duration_sec: float = 300.0
+    chunk_min_duration_sec: float = 600.0
+    chunk_workers: int = 0  # 0 = auto
+    tts_concurrency: int = 0  # 0 = adaptive (edge-tts); >0 = fixed workers
+    tts_max_concurrency: int = 0  # 0 = auto cap (96); adaptive upper bound
+    translate_fallback_online: bool = False
+    translate_concurrency: int = 0  # 0 = auto per provider
+    # Skip Whisper + translation; use sidecar SRT/VTT (Udemy, yt-dlp, …).
+    use_existing_subtitles: bool = False
+    subtitle_files: list[Path] = field(default_factory=list)
 
     @property
     def terms(self) -> list[str]:

@@ -62,8 +62,23 @@ def test_fit_audio_handles_inplace(tmp_path: Path):
     assert 1.45 <= actual <= 1.55
 
 
-def test_build_narration_speeds_up_when_timeline_exceeds_video(tmp_path: Path):
-    """Dense VI TTS longer than video must still produce narration ≤ video length."""
+def test_fit_audio_short_pads_without_slowing(tmp_path: Path, wav_active_duration):
+    from dubvi.ffmpeg import fit_audio_to_duration, probe_duration
+
+    src = tmp_path / "short.wav"
+    dst = tmp_path / "fit.wav"
+    _make_tone(src, 1.0)
+
+    actual = fit_audio_to_duration(src, dst, target_sec=2.0)
+    dur = probe_duration(dst)
+    assert 1.95 <= dur <= 2.05
+    assert 1.95 <= actual <= 2.05
+    active = wav_active_duration(dst)
+    assert 0.85 <= active <= 1.15
+
+
+def test_build_narration_speeds_up_only_when_next_line_blocks(tmp_path: Path):
+    """TTS longer than the gap until the next line must speed up; narration ≤ video."""
     from dubvi.audio import build_narration
     from dubvi.ffmpeg import probe_duration
     from dubvi.models import Segment
@@ -73,22 +88,98 @@ def test_build_narration_speeds_up_when_timeline_exceeds_video(tmp_path: Path):
     segs_dir = work / "segments"
     segs_dir.mkdir()
 
-    # Two back-to-back 1s slots; each TTS is ~1.8s → spill pushes past 2.1s video
+    # Gap 0–1.5s then 1.5–3.0s. TTS 1.8s > 1.5s available → speed up.
     segments = [
         Segment(id=0, start=0.0, end=1.0, text_en="a", text_vi="aaaa"),
-        Segment(id=1, start=1.05, end=2.05, text_en="b", text_vi="bbbb"),
+        Segment(id=1, start=1.5, end=2.5, text_en="b", text_vi="bbbb"),
     ]
     mp3s: dict[int, Path] = {}
     for sid, dur in ((0, 1.8), (1, 1.8)):
         p = segs_dir / f"{sid:04d}.mp3"
-        # Write wav then rename path as .mp3 — ffmpeg accepts wav content via path;
-        # stretch_to_duration uses ffmpeg -i so extension is irrelevant.
         _make_tone(p, dur, freq=330 + sid * 40)
         mp3s[sid] = p
 
-    video_duration = 2.1
+    video_duration = 3.0
     narration = build_narration(segments, work, video_duration, mp3s)
     narr_dur = probe_duration(narration)
 
     assert narr_dur <= video_duration + 0.08
     assert narr_dur > video_duration * 0.85
+
+    from dubvi import cache
+
+    fitted0 = work / cache.FITTED_DIR / "0000.wav"
+    fitted1 = work / cache.FITTED_DIR / "0001.wav"
+    assert 1.40 <= probe_duration(fitted0) <= 1.60
+    assert 1.40 <= probe_duration(fitted1) <= 1.60
+
+
+def test_build_narration_keeps_1x_when_gap_has_room(tmp_path: Path, wav_active_duration):
+    """Cue end is 1s but next line is at 4s — 2.5s TTS stays 1× into the gap."""
+    from dubvi.audio import build_narration
+    from dubvi.ffmpeg import probe_duration
+    from dubvi.models import Segment
+
+    work = tmp_path / "work"
+    work.mkdir()
+    segs_dir = work / "segments"
+    segs_dir.mkdir()
+
+    segments = [
+        Segment(id=0, start=0.0, end=1.0, text_en="a", text_vi="aaaa"),
+        Segment(id=1, start=4.0, end=5.0, text_en="b", text_vi="bb"),
+    ]
+    mp3s: dict[int, Path] = {}
+    p0 = segs_dir / "0000.mp3"
+    p1 = segs_dir / "0001.mp3"
+    _make_tone(p0, 2.5, freq=330)
+    _make_tone(p1, 0.4, freq=440)
+    mp3s[0] = p0
+    mp3s[1] = p1
+
+    video_duration = 5.0
+    build_narration(segments, work, video_duration, mp3s)
+
+    from dubvi import cache
+
+    fitted0 = work / cache.FITTED_DIR / "0000.wav"
+    assert 3.90 <= probe_duration(fitted0) <= 4.10
+    active = wav_active_duration(fitted0)
+    assert 2.30 <= active <= 2.70
+
+
+def test_next_sentence_resets_to_1x_after_sped_sentence(
+    tmp_path: Path, wav_active_duration
+):
+    """A long sentence must not leak its tempo decision into the next one."""
+    from dubvi import cache
+    from dubvi.audio import build_narration
+    from dubvi.models import Segment
+
+    work = tmp_path / "work"
+    work.mkdir()
+    segs_dir = work / cache.SEGMENTS_DIR
+    segs_dir.mkdir()
+
+    segments = [
+        Segment(id=0, start=0.0, end=0.8, text_en="long", text_vi="câu dài"),
+        Segment(id=1, start=1.0, end=1.8, text_en="short", text_vi="câu ngắn"),
+    ]
+    long_src = segs_dir / "0000.mp3"
+    short_src = segs_dir / "0001.mp3"
+    _make_tone(long_src, 1.8, freq=330)
+    _make_tone(short_src, 0.4, freq=440)
+
+    build_narration(
+        segments,
+        work,
+        video_duration=2.0,
+        mp3_paths={0: long_src, 1: short_src},
+    )
+
+    sped = work / cache.FITTED_DIR / "0000.wav"
+    reset = work / cache.FITTED_DIR / "0001.wav"
+    # Sentence 0 is compressed from ~1.8s into its 1.0s allowance.
+    assert 0.85 <= wav_active_duration(sped) <= 1.05
+    # Sentence 1 remains ~0.4s at 1×; the rest of its slot is silence.
+    assert 0.32 <= wav_active_duration(reset) <= 0.52

@@ -38,3 +38,18 @@ def test_unknown_provider_raises():
         assert False, "expected ValueError"
     except ValueError:
         pass
+
+
+def test_xtts_missing_deps_error_keeps_real_cause(monkeypatch):
+    """Frozen-app import failures must show the underlying ImportError, not only a pip hint."""
+    import sys
+
+    from dubvi.providers.offline import _ensure_xtts_deps
+    from dubvi.system_info import EngineError
+
+    monkeypatch.setitem(sys.modules, "TTS", None)  # makes `import TTS` raise ImportError
+    try:
+        _ensure_xtts_deps()
+        assert False, "expected EngineError"
+    except EngineError as e:
+        assert "import of TTS halted" in e.message

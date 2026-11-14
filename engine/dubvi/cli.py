@@ -20,7 +20,7 @@ from .models import (
 )
 from .pipeline import continue_stem, run_job
 from .settings_store import load_settings, save_settings, AppSettings
-from .system_info import collect_system_info, new_job_id, setup_logging
+from .system_info import EngineError, collect_system_info, new_job_id, setup_logging
 
 
 def _add_run_shared(p: argparse.ArgumentParser) -> None:
@@ -44,9 +44,21 @@ def _add_run_shared(p: argparse.ArgumentParser) -> None:
     p.add_argument("--review", action="store_true")
     p.add_argument("--translate-only", action="store_true")
     p.add_argument(
+        "--use-subtitles",
+        action="store_true",
+        help="Bỏ qua nhận dạng + dịch; dùng file SRT/VTT tiếng Việt cạnh video",
+    )
+    p.add_argument(
+        "--subtitles",
+        nargs="+",
+        type=Path,
+        default=[],
+        help="Đường dẫn file SRT/VTT (khớp theo tên video)",
+    )
+    p.add_argument(
         "--translate-provider",
         default=None,
-        help="deep-translator (online) | nllb (offline)",
+        help="deep-translator | nllb | translategemma:4b | translategemma:12b | translategemma:27b",
     )
     p.add_argument(
         "--tts-provider",
@@ -66,6 +78,25 @@ def _add_run_shared(p: argparse.ArgumentParser) -> None:
     p.add_argument("--no-reencode", action="store_true")
     p.add_argument("--no-cleanup", action="store_true")
     p.add_argument("--human", action="store_true")
+    p.add_argument(
+        "--tts-concurrency",
+        type=int,
+        default=None,
+        help="Số request TTS cố định (0=thích ứng theo mạng, mặc định)",
+    )
+    p.add_argument(
+        "--tts-max-concurrency",
+        type=int,
+        default=None,
+        help="Trần request TTS khi thích ứng (0=96, mặc định)",
+    )
+    p.add_argument("--translate-fallback-online", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument(
+        "--translate-concurrency",
+        type=int,
+        default=None,
+        help="Kích thước batch dịch 1–32 (0=tự động); Ollama chạy tuần tự",
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -121,6 +152,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     q_p = sub.add_parser("queue", help="Show job queue JSON")
     q_p.add_argument("--job-id", required=True)
+
+    q_add = sub.add_parser(
+        "queue-add",
+        help="Append videos to a running/paused job queue (auto-processed next)",
+    )
+    q_add.add_argument("--job-id", required=True)
+    q_add.add_argument("--files", "-f", nargs="+", type=Path, required=True)
 
     probe_p = sub.add_parser("probe", help="Probe video duration/size for UI")
     probe_p.add_argument("paths", nargs="+", type=Path)
@@ -229,6 +267,17 @@ def _cfg_from_run(args: argparse.Namespace) -> JobConfig:
     translate_provider = args.translate_provider or settings.translate_provider
     tts_provider = args.tts_provider or settings.tts_provider
     xtts_speaker = args.xtts_speaker or settings.xtts_speaker_wav
+    tts_conc = args.tts_concurrency
+    if tts_conc is None:
+        tts_conc = getattr(settings, "tts_concurrency", 0) or 0
+    translate_conc = args.translate_concurrency
+    if translate_conc is None:
+        translate_conc = getattr(settings, "translate_concurrency", 0) or 0
+    tts_max = getattr(args, "tts_max_concurrency", None)
+    if tts_max is None:
+        tts_max = getattr(settings, "tts_max_concurrency", 0) or 0
+    if not 0 <= int(translate_conc or 0) <= 32:
+        raise SystemExit("Kích thước batch dịch phải từ 0 đến 32")
     return JobConfig(
         input_dir=input_dir,
         input_files=files,
@@ -252,6 +301,12 @@ def _cfg_from_run(args: argparse.Namespace) -> JobConfig:
         translate_provider=translate_provider,
         tts_provider=tts_provider,
         xtts_speaker_wav=xtts_speaker or "",
+        tts_concurrency=int(tts_conc or 0),
+        tts_max_concurrency=int(tts_max or 0),
+        translate_concurrency=int(translate_conc or 0),
+        translate_fallback_online=settings.translate_fallback_online if args.translate_fallback_online is None else args.translate_fallback_online,
+        use_existing_subtitles=bool(getattr(args, "use_subtitles", False)),
+        subtitle_files=[Path(p) for p in (getattr(args, "subtitles", None) or [])],
     )
 
 
@@ -259,17 +314,19 @@ def _privacy_notice() -> dict:
     settings = load_settings()
     translate = settings.translate_provider or "deep-translator"
     tts = settings.tts_provider or "edge-tts"
-    offline_translate = translate.lower() in ("nllb", "nllb-offline", "offline-translate")
+    offline_translate = translate.lower().startswith("translategemma") or translate.lower() in ("nllb", "nllb-offline", "offline-translate")
     offline_tts = tts.lower() in ("xtts-v2", "xtts", "vixtts", "offline-tts")
     leaves = []
     if not offline_translate:
         leaves.append(
             "Đoạn transcript gửi tới dịch vụ dịch (deep-translator / Google Translate web)."
         )
+    if offline_translate and settings.translate_fallback_online:
+        leaves.append("Fallback Google được bật: transcript có thể gửi ra Internet khi dịch local lỗi.")
     if not offline_tts:
         leaves.append("Đoạn text đã dịch gửi tới edge-tts để tạo giọng.")
     if not leaves:
-        leaves.append("Không gửi transcript/TTS ra mạng khi dùng NLLB + XTTS (trừ lúc tải model).")
+        leaves.append("Không gửi transcript/TTS ra mạng khi dùng provider dịch local + XTTS (trừ lúc tải model).")
     stays = [
         "File video gốc và kết quả.",
         "Video tải từ URL (yt-dlp) lưu local trong %LOCALAPPDATA%/DubVI/downloads.",
@@ -278,7 +335,7 @@ def _privacy_notice() -> dict:
         "Cache job trong %LOCALAPPDATA%/DubVI.",
     ]
     if offline_translate:
-        stays.append("Dịch NLLB trên máy (model trong %LOCALAPPDATA%/DubVI/models).")
+        stays.append("Dịch TranslateGemma qua localhost, model do Ollama quản lý; chỉ tải model cần Internet." if translate.startswith("translategemma") else "Dịch NLLB trên máy (model trong %LOCALAPPDATA%/DubVI/models).")
     if offline_tts:
         stays.append("TTS XTTS-v2 trên máy (model trong %LOCALAPPDATA%/DubVI/models).")
     return {
@@ -433,6 +490,22 @@ def main(argv: list[str] | None = None) -> int:
             )
             if not xtts_ok:
                 report["ok"] = False
+        from . import ollama_manager
+        health = ollama_manager.check_health()
+        selected = settings.translate_provider
+        required = selected.startswith("translategemma")
+        report["checks"].extend([
+            {"name": "ollama_runtime", "ok": health["available"], "required": required, "error": health.get("error")},
+            {"name": "ollama_base_url", "ok": True, "path": health["base_url"]},
+            {"name": "ollama_version", "ok": bool(health.get("version")), "version": health.get("version")},
+        ])
+        for model in ollama_manager.ALLOWED_MODELS:
+            installed = any(m.get("name", m.get("model")) == model for m in health["models"])
+            model_required = required and (selected == model or selected == "translategemma" and model.endswith(":4b"))
+            report["checks"].append({"name": "model_" + model.replace(":", "_"), "ok": installed,
+                                      "required": model_required, "error": None if installed else "Chưa tải model hoặc Ollama chưa chạy."})
+            if model_required and not installed:
+                report["ok"] = False
         report["models"] = models_manager.list_models()
         report["privacy"] = _privacy_notice()
         print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -531,7 +604,7 @@ def main(argv: list[str] | None = None) -> int:
         events.set_json_mode(True)
         try:
             path = models_manager.download_model(args.model_id)
-            events.completed(str(path), model=args.model_id)
+            events.completed(str(path) if path is not None else None, model=args.model_id)
             return 0
         except Exception as e:
             from .system_info import EngineError
@@ -610,6 +683,50 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(data, ensure_ascii=False, indent=2))
         return 0
 
+    if args.command == "queue-add":
+        state = load_job_state(args.job_id)
+        if not state:
+            print(json.dumps({"error": "JOB_NOT_FOUND", "job_id": args.job_id}))
+            return 1
+        out_dir = Path(state["output_dir"])
+        try:
+            resolved = queue.resolve_inputs(input_files=list(args.files))
+            data, added = queue.append_videos(args.job_id, resolved, out_dir)
+        except EngineError as e:
+            print(
+                json.dumps(
+                    {"error": e.code.value, "message": e.message},
+                    ensure_ascii=False,
+                )
+            )
+            return 1
+        except Exception as e:
+            print(
+                json.dumps(
+                    {"error": "QUEUE_ADD_FAILED", "message": str(e)},
+                    ensure_ascii=False,
+                )
+            )
+            return 1
+        # Keep job.json input_files in sync for resume/retry
+        prev_files = [str(p) for p in (state.get("input_files") or [])]
+        merged_files = list(dict.fromkeys(prev_files + [str(p) for p in added]))
+        update_job_state(args.job_id, input_files=merged_files)
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "job_id": args.job_id,
+                    "added": [str(p) for p in added],
+                    "added_count": len(added),
+                    "queue": data,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+
     if args.command == "review-get":
         print(json.dumps(review.get_review_payload(args.job_id, args.stem), ensure_ascii=False, indent=2))
         return 0
@@ -640,9 +757,16 @@ def main(argv: list[str] | None = None) -> int:
             review_translation=False,
             prefer_gpu=bool(opts.get("prefer_gpu")),
             translate_provider=opts.get("translate_provider") or "deep-translator",
+            translate_concurrency=int(opts.get("translate_concurrency", 0)),
+            source_lang=opts.get("source_lang", "en"),
+            target_lang=opts.get("target_lang", "vi"),
+            extra_terms=list(opts.get("extra_terms", [])),
+            translate_fallback_online=bool(opts.get("translate_fallback_online", False)),
             tts_provider=opts.get("tts_provider") or "edge-tts",
             xtts_speaker_wav=opts.get("xtts_speaker_wav") or "",
             whisper_model=opts.get("model") or DEFAULT_MODEL,
+            use_existing_subtitles=bool(opts.get("use_existing_subtitles")),
+            subtitle_files=[Path(p) for p in (opts.get("subtitle_files") or [])],
         )
         return continue_stem(cfg, args.stem)
 
@@ -673,8 +797,15 @@ def main(argv: list[str] | None = None) -> int:
             start_from=StartFrom.AUTO,
             review_translation=bool(opts.get("review_translation")),
             translate_provider=opts.get("translate_provider") or "deep-translator",
+            translate_concurrency=int(opts.get("translate_concurrency", 0)),
+            source_lang=opts.get("source_lang", "en"),
+            target_lang=opts.get("target_lang", "vi"),
+            extra_terms=list(opts.get("extra_terms", [])),
+            translate_fallback_online=bool(opts.get("translate_fallback_online", False)),
             tts_provider=opts.get("tts_provider") or "edge-tts",
             xtts_speaker_wav=opts.get("xtts_speaker_wav") or "",
+            use_existing_subtitles=bool(opts.get("use_existing_subtitles")),
+            subtitle_files=[Path(p) for p in (opts.get("subtitle_files") or [])],
         )
         return run_job(cfg)
 
@@ -718,8 +849,15 @@ def main(argv: list[str] | None = None) -> int:
             # Never force-clear cache on resume — continue from last completed stage.
             force=False,
             translate_provider=opts.get("translate_provider") or "deep-translator",
+            translate_concurrency=int(opts.get("translate_concurrency", 0)),
+            source_lang=opts.get("source_lang", "en"),
+            target_lang=opts.get("target_lang", "vi"),
+            extra_terms=list(opts.get("extra_terms", [])),
+            translate_fallback_online=bool(opts.get("translate_fallback_online", False)),
             tts_provider=opts.get("tts_provider") or "edge-tts",
             xtts_speaker_wav=opts.get("xtts_speaker_wav") or "",
+            use_existing_subtitles=bool(opts.get("use_existing_subtitles")),
+            subtitle_files=[Path(p) for p in (opts.get("subtitle_files") or [])],
         )
         return run_job(cfg)
 
